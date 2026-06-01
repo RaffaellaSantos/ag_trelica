@@ -170,7 +170,7 @@ def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, ge
     ax_p.tick_params(colors=PRETO, labelsize=7)
     ax_p.legend(fontsize=6.2, loc="upper right", framealpha=0.9,
                 markerscale=1.0, handletextpad=0.3, ncol=2,
-                bbox_to_anchor=(1.0, 1.16))
+                bbox_to_anchor=(1.0, 1.10))
     for spine in ax_p.spines.values():
         spine.set_color(PRETO)
 
@@ -188,7 +188,7 @@ def animar_evolucao(
 ):
     fig = plt.figure(figsize=(10, 9), facecolor="white")
     ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
-    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
+    ax_p = fig.add_axes([0.165, 0.655, 0.285, 0.205])
 
     def update(frame):
         nuvem_acumulada = []
@@ -230,7 +230,7 @@ def gerar_imagem_final(
 ):
     fig = plt.figure(figsize=(10, 9), facecolor="white")
     ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
-    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
+    ax_p = fig.add_axes([0.165, 0.655, 0.285, 0.205])
 
     _desenhar_quadro(
         ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj,
