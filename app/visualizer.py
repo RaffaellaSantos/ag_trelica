@@ -1,278 +1,242 @@
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
-from matplotlib.gridspec import GridSpec
 from app.utils import Utils
 
 
-# ── Paleta ────────────────────────────────────────────────────────────────────
-BG       = "#0d1117"
-PANEL_BG = "#161b22"
-GRID_COL = "#21262d"
-TEXT_COL = "#e6edf3"
-ACCENT   = "#58a6ff"
-GREEN    = "#3fb950"
-PURPLE   = "#bc8cff"
-RED_C    = "#ff7b72"
-MUTED    = "#8b949e"
+AZUL  = "#1f4ef5"
+VERDE = "#16a34a"
+VERM  = "#ef2b2b"
+PRETO = "#000000"
+CINZA = "#b8b8b8"
+ROXO  = "#7e22ce"
+ROSA  = "#f3b0b0"
 
 
-def _bar_color(length: float) -> str:
-    if length <= 1.5:
-        return ACCENT
-    elif length <= 2.5:
-        return GREEN
+def _area_color(area: float) -> str:
+    idx = int(round(area / 1e-4))
+    if idx <= 3:
+        return AZUL
+    elif idx == 4:
+        return VERDE
     else:
-        return RED_C
+        return VERM
+
+
+def _desenhar_apoio(ax, x, y, rolico=False):
+    h = 0.42
+    b = 0.30
+    ax.plot([x - b, x, x + b], [y - h, y, y - h], color=PRETO, lw=1.3, zorder=6)
+    ax.plot([x - b - 0.05, x + b + 0.05], [y - h, y - h], color=PRETO, lw=1.3, zorder=6)
+    for dx in np.linspace(-b, b, 6):
+        ax.plot([x + dx, x + dx - 0.12], [y - h, y - h - 0.16], color=PRETO, lw=0.8, zorder=6)
+    if rolico:
+        ax.plot([x - b - 0.05, x + b + 0.05], [y - h - 0.20, y - h - 0.20], color=PRETO, lw=1.3, zorder=6)
+
+
+def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, gen, num_geracoes,
+                     forcas_externas, barras_base, barras_verticais):
+    utils = Utils()
+    lb = cromossomo[:barras_base]
+    lv = cromossomo[barras_base:barras_base + barras_verticais]
+    areas = cromossomo[barras_base + barras_verticais:]
+
+    nos, barras, comprimentos, _ = utils.calcular_comprimentos_howe(lb, lv)
+
+    ax.clear()
+    ax.set_facecolor("white")
+    x_max = float(max(nos[:, 0]))
+    ax.set_xlim(-1.0, x_max + 1.2)
+    ax.set_ylim(-1.8, 8.4)
+    ax.set_aspect("equal")
+    ax.set_xticks(np.arange(0, x_max + 1, 2))
+    ax.set_yticks([0, 2, 4, 6, 8])
+    ax.tick_params(colors=PRETO, labelsize=9)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(PRETO)
+
+    for k, (i, j) in enumerate(barras):
+        ax.plot(
+            [nos[i, 0], nos[j, 0]],
+            [nos[i, 1], nos[j, 1]],
+            color=_area_color(areas[k]),
+            lw=2.7,
+            solid_capstyle="round",
+            zorder=2,
+        )
+
+    ax.scatter(nos[:, 0], nos[:, 1], s=34, color=PRETO, zorder=4)
+
+    rotulos = ["A", "B", "C", "D", "E"]
+    for idx in range(5):
+        ax.text(nos[idx, 0], nos[idx, 1] - 0.55, rotulos[idx],
+                ha="center", va="top", fontsize=11, color=PRETO, zorder=5)
+
+    _desenhar_apoio(ax, nos[0, 0], nos[0, 1], rolico=False)
+    _desenhar_apoio(ax, nos[4, 0], nos[4, 1], rolico=True)
+
+    forcas_aplicadas = [(no, fx, fy) for (no, fx, fy) in forcas_externas if abs(fy) > 0 or abs(fx) > 0]
+    if forcas_aplicadas:
+        y_tail = max(nos[no][1] for (no, fx, fy) in forcas_aplicadas) + 1.2
+        for (no, fx, fy) in forcas_aplicadas:
+            x, y = nos[no]
+            mag = abs(fy)
+            ax.annotate(
+                "", xy=(x, y), xytext=(x, y_tail),
+                arrowprops=dict(arrowstyle="-|>", color=PRETO, lw=1.7),
+                zorder=5,
+            )
+            ax.text(x, y_tail + 0.10, f"{mag:.0f} kN", ha="center", va="bottom",
+                    fontsize=10, color=PRETO, zorder=5)
+
+    handles = [
+        Line2D([0], [0], color=AZUL,  lw=3, label=r"$A_1 = 3.\times10^{-4}\ m^2$"),
+        Line2D([0], [0], color=VERDE, lw=3, label=r"$A_2 = 4.\times10^{-4}\ m^2$"),
+        Line2D([0], [0], color=VERM,  lw=3, label=r"$A_3 = 5.\times10^{-4}\ m^2$"),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=10, frameon=False,
+              handlelength=1.8, bbox_to_anchor=(1.0, 1.0))
+
+    ax.text(0.66, 0.74, "OPTIMAL TRUSS", transform=ax.transAxes,
+            color=VERM, fontsize=15, fontweight="bold", ha="center", zorder=5)
+
+    massa_b, delta_b = (melhor_obj if melhor_obj else (0.0, 0.0))
+    ax.text(
+        0.60, 0.40,
+        f"$\\downarrow\\ \\delta$ (node C): {delta_b:.2f} mm\n\nm: {massa_b:.1f} kg",
+        transform=ax.transAxes, ha="center", va="center", fontsize=11, color=PRETO,
+        bbox=dict(boxstyle="round,pad=0.5", fc="white", ec=PRETO, lw=1.0), zorder=7,
+    )
+
+    ax.set_title(
+        f"Genetic_Algorithm _Optimization _Truss (Gen : {gen})",
+        fontsize=13, color=PRETO, fontweight="bold", pad=12,
+        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=PRETO, lw=1.0),
+    )
+
+    ax.text(0.5, 0.965, "Prof. Rubel; rcruzneto@uea.edu.br", transform=ax.transAxes,
+            ha="center", va="top", fontsize=9, color=CINZA, zorder=5)
+
+    ax_p.clear()
+    ax_p.set_facecolor("white")
+    if nuvem:
+        arr = np.array(nuvem)
+        if arr.shape[1] >= 3:
+            fact = arr[:, 2] > 0.5
+            infact = ~fact
+            if infact.any():
+                ax_p.scatter(arr[infact, 0], arr[infact, 1], s=10, color=ROSA,
+                             alpha=0.30, label="Infactivel", zorder=1)
+            if fact.any():
+                ax_p.scatter(arr[fact, 0], arr[fact, 1], s=14, color=CINZA,
+                             alpha=0.85, label="Indiv.", zorder=2)
+        else:
+            ax_p.scatter(arr[:, 0], arr[:, 1], s=14, color=CINZA, alpha=0.85,
+                         label="Indiv.", zorder=2)
+    if fronteira_plot:
+        fp = np.array(fronteira_plot)
+        ax_p.plot(fp[:, 0], fp[:, 1], color=ROXO, lw=1.6, zorder=4)
+        ax_p.scatter(fp[:, 0], fp[:, 1], s=24, color=ROXO, edgecolors="white",
+                     linewidths=0.5, label="Fronteira Pareto", zorder=5)
+    if melhor_obj:
+        ax_p.scatter([melhor_obj[0]], [melhor_obj[1]], s=55, color=AZUL,
+                     edgecolors="white", linewidths=0.6, label="Fittest Indiv.", zorder=6)
+
+    referencia = []
+    if nuvem:
+        arr_ref = np.array(nuvem)
+        if arr_ref.shape[1] >= 3:
+            factiveis = arr_ref[arr_ref[:, 2] > 0.5][:, :2]
+            if len(factiveis):
+                referencia.append(factiveis)
+    if fronteira_plot:
+        referencia.append(np.array(fronteira_plot))
+    if referencia:
+        ref = np.vstack(referencia)
+        x_mn, x_mx = ref[:, 0].min(), ref[:, 0].max()
+        y_mn, y_mx = ref[:, 1].min(), ref[:, 1].max()
+        dx = (x_mx - x_mn) or 1.0
+        dy = (y_mx - y_mn) or 1.0
+        ax_p.set_xlim(x_mn - 0.06 * dx, x_mx + 0.10 * dx)
+        ax_p.set_ylim(max(0.0, y_mn - 0.18 * dy), y_mx + 0.25 * dy)
+
+    ax_p.set_xlabel("Structural truss mass (kg)", fontsize=8, color=PRETO)
+    ax_p.set_ylabel("Deformation of node C (mm)", fontsize=8, color=PRETO)
+    ax_p.tick_params(colors=PRETO, labelsize=7)
+    ax_p.legend(fontsize=6.2, loc="upper right", framealpha=0.9,
+                markerscale=1.0, handletextpad=0.3, ncol=2,
+                bbox_to_anchor=(1.0, 1.16))
+    for spine in ax_p.spines.values():
+        spine.set_color(PRETO)
 
 
 def animar_evolucao(
     historico_cromossomos,
-    historico_fronteiras,
+    historico_nuvem,
+    historico_fronteira_plot,
+    historico_melhor_obj,
     num_geracoes: int,
+    forcas_externas,
     barras_base: int = 4,
     barras_verticais: int = 3,
+    gif_path: str = "best_truss.gif",
 ):
-    utils = Utils()
-    num_barras = 13  # fixo para a treliça Howe
+    fig = plt.figure(figsize=(10, 9), facecolor="white")
+    ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
+    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
 
-    # ── Layout ────────────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(16, 10), facecolor=BG)
-    gs  = GridSpec(
-        2, 2,
-        figure=fig,
-        width_ratios=[1.6, 1],
-        height_ratios=[2.2, 1],
-        hspace=0.38,
-        wspace=0.32,
-        left=0.05, right=0.97,
-        top=0.93,  bottom=0.07,
-    )
-
-    ax_truss  = fig.add_subplot(gs[:, 0])
-    ax_pareto = fig.add_subplot(gs[0, 1])
-    ax_info   = fig.add_subplot(gs[1, 1])
-
-    for ax in (ax_truss, ax_pareto, ax_info):
-        ax.set_facecolor(PANEL_BG)
-        for spine in ax.spines.values():
-            spine.set_edgecolor(GRID_COL)
-
-    # ── Configuração estática do ax_truss ─────────────────────────────────────
-    # Determina limites globais varrendo todos os frames
-    all_x, all_y = [], []
-    for crom in historico_cromossomos:
-        lb = crom[:barras_base]
-        lv = crom[barras_base:barras_base + barras_verticais]
-        nos, _, _, _ = utils.calcular_comprimentos_howe(lb, lv)
-        all_x.extend(nos[:, 0])
-        all_y.extend(nos[:, 1])
-
-    x_min, x_max = min(all_x), max(all_x)
-    y_min, y_max = min(all_y), max(all_y)
-    pad_x = (x_max - x_min) * 0.12 or 0.5
-    pad_y = (y_max - y_min) * 0.35 or 0.5
-
-    ax_truss.set_xlim(x_min - pad_x, x_max + pad_x)
-    ax_truss.set_ylim(y_min - pad_y * 1.5, y_max + pad_y)
-    ax_truss.set_aspect('equal')
-    ax_truss.set_xlabel("x (m)", color=MUTED, fontsize=9)
-    ax_truss.set_ylabel("y (m)", color=MUTED, fontsize=9)
-    ax_truss.tick_params(colors=MUTED)
-    ax_truss.grid(True, color=GRID_COL, linestyle='--', linewidth=0.6, alpha=0.8)
-
-    len_legend = [
-        mpatches.Patch(color=ACCENT, label="L ≤ 1.5 m"),
-        mpatches.Patch(color=GREEN,  label="1.5 < L ≤ 2.5 m"),
-        mpatches.Patch(color=RED_C,  label="L > 2.5 m"),
-    ]
-    ax_truss.legend(
-        handles=len_legend,
-        loc='upper right',
-        fontsize=8,
-        framealpha=0.25,
-        facecolor=PANEL_BG,
-        edgecolor=GRID_COL,
-        labelcolor=TEXT_COL,
-    )
-
-    title_truss = ax_truss.set_title(
-        f"Treliça Howe — Geração 1 / {num_geracoes}",
-        fontsize=13, color=TEXT_COL, fontweight='bold', pad=10,
-    )
-
-    # ── Objetos mutáveis da treliça (criados uma vez) ─────────────────────────
-    bar_lines   = [ax_truss.plot([], [], color=ACCENT, linewidth=2,
-                                 solid_capstyle='round', zorder=2)[0]
-                   for _ in range(num_barras)]
-    bar_labels  = [ax_truss.text(0, 0, '', fontsize=6.5, color=TEXT_COL,
-                                 ha='center', va='bottom',
-                                 fontfamily='monospace', zorder=5)
-                   for _ in range(num_barras)]
-    node_scatter = ax_truss.scatter([], [], s=60, color=TEXT_COL,
-                                    zorder=3, edgecolors=BG, linewidths=1.2)
-    node_labels  = [ax_truss.text(0, 0, str(k), fontsize=7, color=MUTED,
-                                  ha='center', va='top', fontfamily='monospace')
-                    for k in range(8)]  # 8 nós fixos
-
-    vol_text = ax_truss.text(
-        0.02, 0.02, '',
-        fontsize=8, color=ACCENT, ha='left', va='bottom',
-        fontfamily='monospace', transform=ax_truss.transAxes, zorder=6,
-    )
-
-    # ── Configuração estática do ax_pareto ────────────────────────────────────
-    ax_pareto.set_facecolor(PANEL_BG)
-    ax_pareto.set_title("Fronteira de Pareto", fontsize=10, color=TEXT_COL,
-                         fontweight='bold', pad=6)
-    ax_pareto.set_xlabel("Volume (m³)", color=MUTED, fontsize=8)
-    ax_pareto.set_ylabel("Tensão Máx. (kN/m²)", color=MUTED, fontsize=8)
-    ax_pareto.tick_params(colors=MUTED, labelsize=7)
-    ax_pareto.grid(True, color=GRID_COL, linestyle='--', linewidth=0.5, alpha=0.7)
-
-    # Objetos mutáveis do Pareto
-    scatter_hist  = ax_pareto.scatter([], [], s=12, color=MUTED, alpha=0.2, zorder=1)
-    pareto_line,  = ax_pareto.plot([], [], color=PURPLE, linewidth=1.2, zorder=2)
-    scatter_front = ax_pareto.scatter([], [], s=30, color=PURPLE,
-                                      edgecolors=BG, linewidths=0.8, zorder=3)
-
-    # ── Configuração estática do ax_info ──────────────────────────────────────
-    ax_info.axis('off')
-    ax_info.set_title("Áreas Transversais (m²)", fontsize=10, color=TEXT_COL,
-                       fontweight='bold', pad=6)
-
-    cols       = 3
-    rows_need  = int(np.ceil(num_barras / cols))
-    col_w      = 1.0 / cols
-    row_h      = 0.85 / max(rows_need, 1)
-
-    # Cria caixas e textos de área uma única vez
-    area_rects = []
-    area_texts = []
-    for k in range(num_barras):
-        col = k % cols
-        row = k // cols
-        cx  = 0.05 + col * col_w
-        cy  = 0.88 - row * row_h
-
-        rect = mpatches.FancyBboxPatch(
-            (cx, cy - row_h * 0.6), col_w * 0.9, row_h * 0.7,
-            boxstyle="round,pad=0.01",
-            linewidth=0.5, edgecolor=GRID_COL,
-            facecolor=plt.cm.YlOrRd(0.5), alpha=0.7,
-            transform=ax_info.transAxes, clip_on=False,
+    def update(frame):
+        nuvem_acumulada = []
+        for g in range(min(frame + 1, len(historico_nuvem))):
+            nuvem_acumulada.extend(historico_nuvem[g])
+        fronteira_plot = historico_fronteira_plot[frame] if frame < len(historico_fronteira_plot) else []
+        _desenhar_quadro(
+            ax, ax_p,
+            historico_cromossomos[frame],
+            nuvem_acumulada,
+            fronteira_plot,
+            historico_melhor_obj[frame] if frame < len(historico_melhor_obj) else None,
+            frame + 1, num_geracoes, forcas_externas, barras_base, barras_verticais,
         )
-        ax_info.add_patch(rect)
-        area_rects.append(rect)
+        return []
 
-        txt = ax_info.text(
-            cx + col_w * 0.45, cy - row_h * 0.25,
-            f"B{k+1:02d}\n—",
-            fontsize=6.2, color=TEXT_COL, ha='center', va='center',
-            fontfamily='monospace', transform=ax_info.transAxes,
-        )
-        area_texts.append(txt)
-
-    vol_info_text = ax_info.text(
-        0.5, -0.04, '',
-        fontsize=8, color=ACCENT, ha='center', va='bottom',
-        transform=ax_info.transAxes, fontfamily='monospace',
-    )
-
-    # ── Estado acumulado do Pareto ─────────────────────────────────────────────
-    acc_vols = []
-    acc_tens = []
-
-    # ── Função de update — só modifica dados, não recria artistas ─────────────
-    def update(frame: int):
-        cromossomo = historico_cromossomos[frame]
-        l_bases = cromossomo[:barras_base]
-        l_verts = cromossomo[barras_base:barras_base + barras_verticais]
-        areas   = cromossomo[barras_base + barras_verticais:]
-
-        nos, barras, comprimentos, _ = utils.calcular_comprimentos_howe(l_bases, l_verts)
-
-        a_min   = areas.min()
-        a_max   = areas.max()
-        a_range = a_max - a_min if a_max > a_min else 1e-9
-
-        # — Barras —
-        for idx, (i, j) in enumerate(barras):
-            x = [nos[i, 0], nos[j, 0]]
-            y = [nos[i, 1], nos[j, 1]]
-            L   = comprimentos[idx]
-            lw  = 1.5 + 6.0 * (areas[idx] - a_min) / a_range
-            bar_lines[idx].set_data(x, y)
-            bar_lines[idx].set_color(_bar_color(L))
-            bar_lines[idx].set_linewidth(lw)
-
-            mx = (nos[i, 0] + nos[j, 0]) / 2
-            my = (nos[i, 1] + nos[j, 1]) / 2
-            bar_labels[idx].set_position((mx, my + 0.08))
-            bar_labels[idx].set_text(f"{L:.2f}m")
-
-        # — Nós —
-        node_scatter.set_offsets(nos)
-        for k, (nx, ny) in enumerate(nos):
-            node_labels[k].set_position((nx, ny - 0.18))
-
-        # — Título e volume —
-        title_truss.set_text(f"Treliça Howe — Geração {frame + 1} / {num_geracoes}")
-        vol_cur = sum(L * A for L, A in zip(comprimentos, areas))
-        vol_text.set_text(f"Vol: {vol_cur:.5f} m³")
-
-        # — Pareto —
-        pontos = historico_fronteiras[frame]
-        if pontos:
-            vs = [p[0] for p in pontos]
-            ts = [p[1] for p in pontos]
-            acc_vols.extend(vs)
-            acc_tens.extend(ts)
-
-            sorted_pts = sorted(zip(vs, ts))
-            svs = [p[0] for p in sorted_pts]
-            sts = [p[1] for p in sorted_pts]
-            pareto_line.set_data(svs, sts)
-            scatter_front.set_offsets(np.c_[svs, sts])
-
-        if acc_vols:
-            scatter_hist.set_offsets(np.c_[acc_vols, acc_tens])
-            # Reajusta limites do Pareto dinamicamente
-            ax_pareto.set_xlim(min(acc_vols) * 0.95, max(acc_vols) * 1.05)
-            ax_pareto.set_ylim(min(acc_tens) * 0.95, max(acc_tens) * 1.05)
-
-        # — Áreas —
-        for k, A in enumerate(areas):
-            norm_a = (A - a_min) / a_range if a_range > 1e-12 else 0.5
-            area_rects[k].set_facecolor(plt.cm.YlOrRd(0.25 + 0.65 * norm_a))
-            area_texts[k].set_text(f"B{k+1:02d}\n{A*1e4:.2f}×10⁻⁴")
-
-        vol_info_text.set_text(f"Volume atual: {vol_cur:.5f} m³")
-
-        return (bar_lines + bar_labels + [node_scatter] + node_labels
-                + [title_truss, vol_text, pareto_line, scatter_front,
-                   scatter_hist, vol_info_text] + area_rects + area_texts)
-
-    # ── Animação ──────────────────────────────────────────────────────────────
     ani = animation.FuncAnimation(
-        fig, update,
-        frames=len(historico_cromossomos),
-        interval=120,
-        repeat=False,
-        blit=True,   # só redesenha os artistas retornados por update()
+        fig, update, frames=len(historico_cromossomos),
+        interval=120, repeat=False, blit=False,
     )
 
-    fig.suptitle(
-        "Otimização Multiobjetivo de Treliça Howe — NSGA-II",
-        fontsize=14, color=TEXT_COL, fontweight='bold', y=0.98,
+    print(f"Salvando animacao em '{gif_path}'...")
+    ani.save(gif_path, writer="pillow", fps=8, dpi=90)
+    print(f"GIF salvo: {gif_path}")
+    plt.close(fig)
+
+
+def gerar_imagem_final(
+    cromossomo,
+    nuvem,
+    fronteira_plot,
+    melhor_obj,
+    gen,
+    num_geracoes,
+    forcas_externas,
+    barras_base: int = 4,
+    barras_verticais: int = 3,
+    png_path: str = "best_truss_final.png",
+):
+    fig = plt.figure(figsize=(10, 9), facecolor="white")
+    ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
+    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
+
+    _desenhar_quadro(
+        ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj,
+        gen, num_geracoes, forcas_externas, barras_base, barras_verticais,
     )
 
-    # ── Salvar GIF ────────────────────────────────────────────────────────────
-    gif_path = "best_truss.gif"
-    print(f"Salvando animação em '{gif_path}'… (isso pode levar alguns instantes)")
-    ani.save(gif_path, writer="pillow", fps=8, dpi=100)
-    print(f"GIF salvo com sucesso: {gif_path}")
-
-    plt.show()
+    fig.savefig(png_path, dpi=130, facecolor="white")
+    print(f"Imagem final salva: {png_path}")
+    plt.close(fig)

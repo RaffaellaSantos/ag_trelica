@@ -1,6 +1,5 @@
 import numpy as np
 
-
 class Utils():
 
     def calcular_comprimentos_howe(self, l_bases, l_verticais):
@@ -42,7 +41,7 @@ class Utils():
 
     def gerar_vetor_areas(self, num_barras, area):
         return [area for _ in range(num_barras)]
-    
+
     def calcular_reacoes_e_forcas(self, nos, barras, angulos, forcas_externas, forcas_virtuais):
         num_nos = len(nos)
         num_barras = len(barras)
@@ -79,7 +78,7 @@ class Utils():
         f_virtual = solucao_virtual[:num_barras]
 
         return f_real, reacoes_reais, f_virtual
-    
+
     def calcular_deslocamento_virtual(self, barras, comprimentos, areas, f_real, f_virtual, E_GPa=200.0):
         dados = []
         deslocamento_total = 0.0
@@ -98,8 +97,8 @@ class Utils():
             dados.append({
                 'Barra': f"{barras[k][0]}-{barras[k][1]}",
                 'Comprimento (m)': round(L, 4),
-                'Força Real (kN)': round(F_kN, 2),
-                'Força Virtual (kN)': round(F_v, 2),
+                'Forca Real (kN)': round(F_kN, 2),
+                'Forca Virtual (kN)': round(F_v, 2),
                 'Deslocamento (mm)': round(delta_mm, 3)
             })
 
