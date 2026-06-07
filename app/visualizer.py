@@ -37,7 +37,7 @@ def _desenhar_apoio(ax, x, y, rolico=False):
         ax.plot([x - b - 0.05, x + b + 0.05], [y - h - 0.20, y - h - 0.20], color=PRETO, lw=1.3, zorder=6)
 
 
-def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, gen, num_geracoes,
+def _desenhar_quadro(ax, cromossomo, nuvem, fronteira_plot, melhor_obj, gen, num_geracoes,
                      forcas_externas, barras_base, barras_verticais):
     utils = Utils()
     lb = cromossomo[:barras_base]
@@ -47,6 +47,7 @@ def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, ge
     nos, barras, comprimentos, _ = utils.calcular_comprimentos_howe(lb, lv)
 
     ax.clear()
+    ax_p = ax.inset_axes([0.42, 0.56, 0.32, 0.40])
     ax.set_facecolor("white")
     x_max = float(max(nos[:, 0]))
     ax.set_xlim(-1.0, x_max + 1.2)
@@ -119,8 +120,6 @@ def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, ge
         bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=PRETO, lw=1.0),
     )
 
-    ax.text(0.5, 0.965, "Prof. Rubel; rcruzneto@uea.edu.br", transform=ax.transAxes,
-            ha="center", va="top", fontsize=9, color=CINZA, zorder=5)
 
     ax_p.clear()
     ax_p.set_facecolor("white")
@@ -169,8 +168,7 @@ def _desenhar_quadro(ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj, ge
     ax_p.set_ylabel("Deformation of node C (mm)", fontsize=8, color=PRETO)
     ax_p.tick_params(colors=PRETO, labelsize=7)
     ax_p.legend(fontsize=6.2, loc="upper right", framealpha=0.9,
-                markerscale=1.0, handletextpad=0.3, ncol=2,
-                bbox_to_anchor=(1.0, 1.16))
+                markerscale=1.0, handletextpad=0.3, ncol=2)
     for spine in ax_p.spines.values():
         spine.set_color(PRETO)
 
@@ -188,7 +186,6 @@ def animar_evolucao(
 ):
     fig = plt.figure(figsize=(10, 9), facecolor="white")
     ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
-    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
 
     def update(frame):
         nuvem_acumulada = []
@@ -196,7 +193,7 @@ def animar_evolucao(
             nuvem_acumulada.extend(historico_nuvem[g])
         fronteira_plot = historico_fronteira_plot[frame] if frame < len(historico_fronteira_plot) else []
         _desenhar_quadro(
-            ax, ax_p,
+            ax,
             historico_cromossomos[frame],
             nuvem_acumulada,
             fronteira_plot,
@@ -230,10 +227,9 @@ def gerar_imagem_final(
 ):
     fig = plt.figure(figsize=(10, 9), facecolor="white")
     ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
-    ax_p = fig.add_axes([0.085, 0.635, 0.29, 0.235])
 
     _desenhar_quadro(
-        ax, ax_p, cromossomo, nuvem, fronteira_plot, melhor_obj,
+        ax, cromossomo, nuvem, fronteira_plot, melhor_obj,
         gen, num_geracoes, forcas_externas, barras_base, barras_verticais,
     )
 
