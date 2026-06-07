@@ -223,14 +223,15 @@ def animate_evolution(
     history_best_obj,
     total_gens: int,
     gif_path: str = "best_truss.gif",
-    max_frames: int = 50,
+    max_frames: int | None = None,
 ):
-    """GIF da evolução com treliça (esq.) e scatter (dir.) em subplots separados."""
+    """GIF da evolução com treliça (esq.) e scatter (dir.) em subplots separados.
+    max_frames=None usa todas as gerações; um inteiro amostra uniformemente."""
     n = len(history_best)
-    indices = (
-        list(range(n)) if n <= max_frames
-        else [round(i * (n - 1) / (max_frames - 1)) for i in range(max_frames)]
-    )
+    if max_frames is None or n <= max_frames:
+        indices = list(range(n))
+    else:
+        indices = [round(i * (n - 1) / (max_frames - 1)) for i in range(max_frames)]
 
     # Nuvem acumulada (últimas 15 gerações para não sobrecarregar)
     cloud_acc: list = []

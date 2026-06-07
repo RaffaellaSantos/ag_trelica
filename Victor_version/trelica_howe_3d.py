@@ -25,8 +25,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import random
+import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.utils import Utils as _AppUtils
 
 
 # ── Constantes ────────────────────────────────────────────────────────────────
@@ -125,41 +130,37 @@ def node_coords(p_cm: np.ndarray, h_cm: np.ndarray) -> dict[str, np.ndarray]:
 
 # ── Análise estrutural (pórtico plano, carga unitária) ───────────────────────
 def solve_axial_forces(nodes: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-    """Equilíbrio de nós 2D sob 1 N em C. Retorna (forças_unitárias, comprimentos)."""
-    n_bars = len(CONNECTIVITY)
-    names  = list(nodes)
-    idx    = {nm: i for i, nm in enumerate(names)}
-    n_nodes = len(names)
+    """
+    Equilíbrio de nós sob 1 N em C.
+    Reaproveitado de app/utils.py (Atividade 8): Utils.calcular_reacoes_e_forcas.
+    Retorna (forças_unitárias, comprimentos).
+    """
+    names      = list(nodes)
+    idx        = {nm: i for i, nm in enumerate(names)}
+    nos_arr    = np.array([nodes[nm] for nm in names])
+    barras_arr = np.array([[idx[na], idx[nb]] for na, nb in CONNECTIVITY])
 
-    lengths = np.empty(n_bars)
-    cos_sin = np.empty((n_bars, 2))
+    lengths = np.empty(len(CONNECTIVITY))
+    angulos = []
     for e, (na, nb) in enumerate(CONNECTIVITY):
         d = nodes[nb] - nodes[na]
         L = float(math.hypot(d[0], d[1]))
         if L < 1e-12:
             raise ValueError(f"Barra {BAR_NAMES[e]}: comprimento nulo.")
         lengths[e] = L
-        cos_sin[e] = d[0]/L, d[1]/L
+        angulos.append((d[0] / L, d[1] / L))
 
-    A_eq = np.zeros((2*n_nodes, n_bars+3))
-    b_eq = np.zeros(2*n_nodes)
-
-    for e, (na, nb) in enumerate(CONNECTIVITY):
-        cx, cy = cos_sin[e]
-        ia, ib = idx[na], idx[nb]
-        A_eq[2*ia,   e] += cx;  A_eq[2*ia+1, e] += cy
-        A_eq[2*ib,   e] -= cx;  A_eq[2*ib+1, e] -= cy
-
-    A_eq[2*idx["A"],     n_bars]   = 1.0
-    A_eq[2*idx["A"]+1,   n_bars+1] = 1.0
-    A_eq[2*idx["E"]+1,   n_bars+2] = 1.0
-    b_eq[2*idx[LOAD_NODE]+1]       = 1.0
-
+    carga_unit = [(idx[LOAD_NODE], 0.0, -1.0)]
     try:
-        x = np.linalg.solve(A_eq, b_eq)
+        axial_unit, _, _ = _AppUtils().calcular_reacoes_e_forcas(
+            nos_arr, barras_arr, angulos,
+            forcas_externas=carga_unit,
+            forcas_virtuais=carga_unit,
+        )
     except np.linalg.LinAlgError:
         raise ValueError("Sistema singular: geometria instável.")
-    return x[:n_bars], lengths
+
+    return axial_unit, lengths
 
 
 def ptv_displacement_unit(axial_unit, lengths, areas) -> float:
@@ -180,9 +181,14 @@ def stick_count_3d(sections: np.ndarray) -> int:
     return 2 * int(np.sum(sections)) + N_BRACE_BARS * N_BRACE
 
 
-def bar_capacity(unit_axial_n: float, n_sticks: int) -> float:
+def bar_capacity(unit_axial_n: float, n_sticks: int, length_m: float) -> float:
+    """Tração → σt·A; Compressão → min(σc·A, Euler), palitos em paralelo (∝ n)."""
     area = section_area(n_sticks)
-    return SIGMA_T_ALLOW * area if unit_axial_n > 0.0 else SIGMA_C_ALLOW * area
+    if unit_axial_n > 0.0:
+        return SIGMA_T_ALLOW * area
+    inertia_single = B * T ** 3 / 12.0
+    euler          = n_sticks * math.pi ** 2 * E * inertia_single / length_m ** 2
+    return min(SIGMA_C_ALLOW * area, euler)
 
 
 # ── Avaliação ─────────────────────────────────────────────────────────────────
@@ -222,7 +228,7 @@ def evaluate(ind: Individual) -> Individual:
     for i, coeff in enumerate(axial_unit):
         if abs(coeff) < 1e-12:
             continue
-        rupture[i] = bar_capacity(float(coeff), int(ind.n[i])) / abs(coeff)
+        rupture[i] = bar_capacity(float(coeff), int(ind.n[i]), float(lengths_m[i])) / abs(coeff)
 
     load_n_frame = float(np.min(rupture))   # ruptura de 1 pórtico sob P/2
     load_n_3d    = 2.0 * load_n_frame       # carga total da estrutura 3D
@@ -466,54 +472,38 @@ def print_report_builder(best: Individual) -> None:
 
     print(f"\n{SEP}")
     print("  RELATÓRIO DE CONSTRUÇÃO — TRELIÇA HOWE 3D DE PALITOS".center(W))
-    print("  Atividade 9  |  EST/UEA  |  Algoritmos de Otimização".center(W))
     print(SEP)
 
-    print(f"\n  MATERIAL")
-    print(f"  {'Madeira':28s}: Bétula (palito de picolé)")
-    print(f"  {'E':28s}: 3 500 MPa   ρ = 510 kg/m³")
-    print(f"  {'σt adm (Sg=2)':28s}: 27.5 MPa   σc adm: 17.5 MPa")
-    print(f"  {'Palito':28s}: 11.4 × 1.0 × 0.2 cm")
+    # ── Geometria ─────────────────────────────────────────────────────────────
+    print(f"\n  Painéis (p1…p4) : {' | '.join(f'{v:.3f}' for v in p)} cm   Σ = {sum(p):.1f} cm")
+    print(f"  Alturas (h1…h5) : {' | '.join(f'{v:.3f}' for v in h)} cm")
+    print(f"  Largura (w)     : {w_cm:.3f} cm  (entre pórticos)")
+    print(f"\n  {'Nó':>3}  {'x (cm)':>8}  {'y (cm)':>8}")
+    print(f"  {'─'*3}  {'─'*8}  {'─'*8}")
+    for nm, (xn, yn) in nós.items():
+        print(f"  {nm:>3}  {xn:8.3f}  {yn:8.3f}")
 
+    # ── Inventário ────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print("  1. GEOMETRIA")
-    print(sep)
-    print(f"\n  Painéis (p1…p4): {' | '.join(f'{v:.3f} cm' for v in p)}   Σ = {sum(p):.1f} cm")
-    print(f"  Alturas (h1…h5): {' | '.join(f'{v:.3f} cm' for v in h)}")
-    print(f"  Largura (w)    : {w_cm:.3f} cm  (distância entre pórticos)")
-    print(f"\n  {'Nó':>3}  {'x (cm)':>8}  {'y (cm)':>8}  Nível")
-    print(f"  {'---':>3}  {'--------':>8}  {'--------':>8}  --------")
-    for nm,(xn,yn) in nós.items():
-        print(f"  {nm:>3}  {xn:8.3f}  {yn:8.3f}  "
-              f"{'Banzo inferior' if yn==0 else 'Banzo superior'}")
-    print(f"\n  Cada pórtico é replicado com deslocamento z = {w_cm:.3f} cm.")
-    print(f"  Nós espelhados: A'…J'  (mesmas x,y — z = {w_cm:.3f} cm)")
-
-    print(f"\n{sep}")
-    print("  2. INVENTÁRIO DE BARRAS  (por pórtico — replicar × 2)")
-    print(sep)
-    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'L (cm)':>7}  {'n':>2}  {'A(cm²)':>6}  {'Palitos/pórtico':>15}")
-    print(f"  {'─'*5}  {'─'*18}  {'─'*7}  {'─'*2}  {'─'*6}  {'─'*15}")
+    print(f"  BARRAS  (por pórtico — replicar × 2)")
+    print(f"  {'Barra':>5}  {'Tipo':18}  {'L (cm)':>7}  {'n':>2}  {'A(cm²)':>6}  Palitos")
+    print(f"  {'─'*5}  {'─'*18}  {'─'*7}  {'─'*2}  {'─'*6}  {'─'*7}")
     for r in inv:
         print(f"  {r['bar']:>5}  {r['tipo']:18}  {r['L']:7.3f}  "
-              f"{r['n']:>2}  {r['area_cm2']:6.4f}  {r['phys']:>15}")
-    print(f"\n  Subtotal por pórtico      : {phys_frame} palitos")
-    print(f"  2 pórticos                : {2*phys_frame} palitos")
-    print(f"  Travamentos (10 × w={w_cm:.1f}cm): {brace_sticks} palitos físicos "
-          f"(cortar {cuts_per_stick} peças de {w_cm:.1f} cm por palito)")
-    print(f"  TOTAL FÍSICO              : {total_phys} palitos")
-    print(f"  Recomenda-se comprar      : {int(total_phys*1.15)+1} palitos (+15 % folga)")
-    print(f"\n  R5 (Σni ≤ 150): 2×{int(sum(n_arr))} + 10 = {stick_count_3d(n_arr)}  "
+              f"{r['n']:>2}  {r['area_cm2']:6.4f}  {r['phys']:>7}")
+    print(f"\n  2 pórticos: {2*phys_frame} palitos  +  "
+          f"10 travamentos ({w_cm:.1f} cm): {brace_sticks} palitos")
+    print(f"  TOTAL: {total_phys} palitos  "
+          f"(comprar {int(total_phys*1.15)+1} com +15 % folga)")
+    print(f"  R5: 2×{int(sum(n_arr))}+10 = {stick_count_3d(n_arr)}/150  "
           f"{'[OK]' if stick_count_3d(n_arr)<=150 else '[VIOLA]'}")
 
+    # ── Esforços ──────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print(f"  3. ESFORÇOS NA RUPTURA  "
-          f"(P_total = {load_kg_3d:.4f} kg  |  P/pórtico = {load_n_fr/G:.4f} kg)")
-    print(sep)
-    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'N (N)':>9}  {'σ (MPa)':>8}  "
-          f"{'σadm':>6}  {'FS':>5}  Estado")
-    print(f"  {'─'*5}  {'─'*18}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*5}  ─────────")
-    for bar, ni, nr, st in zip(BAR_NAMES, n_arr, axial_fr, stresses):
+    print(f"  ESFORÇOS  —  P total = {load_kg_3d:.4f} kg  |  P/pórtico = {load_n_fr/G:.4f} kg")
+    print(f"\n  {'Barra':>5}  {'N (N)':>9}  {'σ (MPa)':>8}  {'FS':>5}  Estado")
+    print(f"  {'─'*5}  {'─'*9}  {'─'*8}  {'─'*5}  ─────────")
+    for bar, nr, st in zip(BAR_NAMES, axial_fr, stresses):
         if abs(nr) < 1e-9:
             estado="zero      "; σadm=27.5; fs_s="  —  "
         elif nr > 0:
@@ -522,57 +512,35 @@ def print_report_builder(best: Individual) -> None:
         else:
             estado="compressão"; σadm=17.5
             fs_s=f"{σadm/abs(st):.2f}" if abs(st)>1e-9 else "  ∞  "
-        ok="OK" if abs(st)<=σadm+1e-6 else "VIOLA"
-        print(f"  {bar:>5}  {_BAR_TYPE.get(bar,''):18}  {nr:+9.2f}  "
-              f"{st:+8.3f}  {σadm:>6.1f}  {fs_s:>5}  {estado} [{ok}]")
+        ok = "" if abs(st) <= σadm + 1e-6 else " ← VIOLA"
+        print(f"  {bar:>5}  {nr:+9.2f}  {st:+8.3f}  {fs_s:>5}  {estado}{ok}")
 
+    # ── Resultados ────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print("  4. RESULTADOS GLOBAIS")
-    print(sep)
-    print(f"\n  {'Massa total (2 pórticos + travamentos)':42s}: {m_g:.4f} g")
-    print(f"  {'Carga de ruptura total (3D)':42s}: {load_kg_3d:.4f} kg")
-    print(f"  {'Carga por pórtico na ruptura':42s}: {load_n_fr/G:.4f} kg")
-    print(f"  {'Fitness 3D (carga/massa)':42s}: {best.fitness:.6f} kg/g")
-    print(f"  {'Deslocamento Δ_C na ruptura':42s}: {delta_mm:.4f} mm")
-    print(f"  {'Barra crítica':42s}: {crit}  ({_BAR_TYPE.get(crit,'')})")
-    print(f"  {'Largura entre pórticos (w)':42s}: {w_cm:.3f} cm")
-    print(f"  {'Palitos totais (físicos estimados)':42s}: {total_phys}")
-    print(f"  {'Solução viável':42s}: {'Sim ✓' if best.feasible else 'Não ✗'}")
+    print(f"  Carga de ruptura (3D)  : {load_kg_3d:.4f} kg")
+    print(f"  Carga por pórtico      : {load_n_fr/G:.4f} kg")
+    print(f"  Massa total            : {m_g:.4f} g")
+    print(f"  Fitness                : {best.fitness:.6f} kg/g")
+    print(f"  Δ_C na ruptura         : {delta_mm:.4f} mm")
+    print(f"  Barra crítica          : {crit}  ({_BAR_TYPE.get(crit,'')})")
+    print(f"  Largura w              : {w_cm:.3f} cm")
+    print(f"  Viável                 : {'Sim' if best.feasible else 'Não'}")
+    if not best.feasible:
+        for r in d.get("penalty_reasons", []):
+            print(f"    ✗ {r}")
 
-    print(f"\n{sep}")
-    print("  5. GUIA DE CORTE E MONTAGEM 3D")
-    print(sep)
+    # ── Cortes ────────────────────────────────────────────────────────────────
     a_cortar = [r for r in inv if r["L"] < 11.35]
-    print(f"\n  CORTES NECESSÁRIOS (por pórtico — repetir para o 2º pórtico):")
-    for r in a_cortar:
-        sobra = 11.4 - r["L"]
-        print(f"    {r['bar']:>5}  {r['L']:.3f} cm  →  retirar {sobra:.3f} cm  "
-              f"({r['n']} camada(s))")
-    print(f"\n  TRAVAMENTOS (10 peças de {w_cm:.2f} cm cada):")
-    print(f"    De 1 palito de 11.4 cm cortam-se {cuts_per_stick} travamentos.")
-    print(f"    Total de palitos para travamentos: {brace_sticks}")
-    print(f"""
-  SEQUÊNCIA DE MONTAGEM:
-    1. Trace 2 gabaritos idênticos em papel milimetrado (um por pórtico).
-    2. Monte o PÓRTICO 1 completo sobre o gabarito.
-    3. Monte o PÓRTICO 2 idêntico sobre o segundo gabarito.
-    4. Aguarde cura completa dos dois pórticos (≥ 30 min).
-    5. Posicione os pórticos lado a lado com {w_cm:.1f} cm de separação.
-    6. Cole os 10 TRAVAMENTOS conectando nós correspondentes:
-         Banzo inferior : A─A'  B─B'  C─C'  D─D'  E─E'
-         Banzo superior : F─F'  G─G'  H─H'  I─I'  J─J'
-    7. Use esquadro para garantir 90° entre os pórticos e os travamentos.
-
-  PONTOS CRÍTICOS:
-    • Nó C e C' (centro do banzo inferior) = ponto de carga.
-      Pendurar o balde no ponto médio entre C e C'.
-    • Vão livre entre apoios: 40 cm.
-    • Pese a estrutura completa antes do ensaio (previsto: {m_g:.1f} g).
-
-  PREVISÃO DO ENSAIO:
-    Carga de ruptura: {load_kg_3d:.2f} kg   |   Eficiência: {best.fitness:.4f} kg/g
-""")
-    print(SEP)
+    if a_cortar:
+        print(f"\n{sep}")
+        print(f"  CORTES  (por pórtico — repetir × 2 | palito inteiro = 11.4 cm)")
+        print(f"  {'Barra':>5}  {'L (cm)':>7}  {'retirar':>8}  Camadas")
+        for r in a_cortar:
+            print(f"  {r['bar']:>5}  {r['L']:7.3f}  {11.4-r['L']:8.3f} cm"
+                  f"  {r['n']} camada(s)")
+    print(f"\n  Travamentos: 10 × {w_cm:.2f} cm  "
+          f"({cuts_per_stick} peças/palito → {brace_sticks} palito(s))")
+    print(f"\n{SEP}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

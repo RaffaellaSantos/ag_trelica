@@ -19,8 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import random
+import sys
+from pathlib import Path
 
 import numpy as np
+
+# Reaproveitamento da Atividade 8 — equilíbrio de nós já implementado em app/utils.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.utils import Utils as _AppUtils
 
 
 # =========================
@@ -117,58 +123,41 @@ def node_coords(p_cm: np.ndarray, h_cm: np.ndarray) -> dict[str, np.ndarray]:
 
 def solve_axial_forces(nodes: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     """
-    Equilíbrio de nós (método dos nós) sob carga unitária (1 N) para baixo em C.
-    Apoios: A (pino, x e y) e E (rolete, y). Convenção: positivo = tração.
-
-    Monta sistema linear 20×20:
-        A · [F1..F17, Ax, Ay, Ey]ᵀ = b
-    onde cada par de linhas representa ΣFx=0 e ΣFy=0 num nó.
-    Retorna (forças axiais unitárias, comprimentos das barras), ambos por barra.
+    Equilíbrio de nós sob carga unitária (1 N) para baixo em C.
+    Reaproveitado de app/utils.py (Atividade 8): Utils.calcular_reacoes_e_forcas.
+    Apoios: A (pino) em índice 0 e E (rolete) em índice 4 — coincidem com
+    o hardcode da Atividade 8 (A[0], A[1], A[2*4+1]).
+    Retorna (forças axiais unitárias, comprimentos), ambos por barra.
     """
-    n_bars = len(CONNECTIVITY)
     names = list(nodes)
-    idx = {name: i for i, name in enumerate(names)}
-    n_nodes = len(names)
+    idx   = {nm: i for i, nm in enumerate(names)}
 
-    lengths = np.empty(n_bars)
-    cos_sin = np.empty((n_bars, 2))
+    nos_arr    = np.array([nodes[nm] for nm in names])
+    barras_arr = np.array([[idx[na], idx[nb]] for na, nb in CONNECTIVITY])
+
+    lengths = np.empty(len(CONNECTIVITY))
+    angulos = []
     for e, (na, nb) in enumerate(CONNECTIVITY):
         d = nodes[nb] - nodes[na]
         L = float(math.hypot(d[0], d[1]))
         if L < 1e-12:
             raise ValueError(f"Barra {BAR_NAMES[e]}: comprimento nulo.")
         lengths[e] = L
-        cos_sin[e] = d[0] / L, d[1] / L
+        angulos.append((d[0] / L, d[1] / L))
 
-    # x = [F0..F16, Ax, Ay, Ey]  →  20 incógnitas
-    n_unk = n_bars + 3
-    A_eq = np.zeros((2 * n_nodes, n_unk))
-    b_eq = np.zeros(2 * n_nodes)
-
-    # Contribuição de cada barra: tensão F puxa na em direção a nb (+ûe)
-    # e puxa nb em direção a na (−ûe).
-    for e, (na, nb) in enumerate(CONNECTIVITY):
-        cx, cy = cos_sin[e]
-        ia, ib = idx[na], idx[nb]
-        A_eq[2 * ia,     e] += cx
-        A_eq[2 * ia + 1, e] += cy
-        A_eq[2 * ib,     e] -= cx
-        A_eq[2 * ib + 1, e] -= cy
-
-    # Reações de apoio como incógnitas adicionais
-    A_eq[2 * idx["A"],     n_bars]     = 1.0  # Ax → ΣFx no nó A
-    A_eq[2 * idx["A"] + 1, n_bars + 1] = 1.0  # Ay → ΣFy no nó A
-    A_eq[2 * idx["E"] + 1, n_bars + 2] = 1.0  # Ey → ΣFy no nó E
-
-    # Carga externa: 1 N para baixo no nó de carga (passa para o lado direito)
-    b_eq[2 * idx[LOAD_NODE] + 1] = 1.0
+    # Carga unitária (1 N) para baixo no nó de carga
+    carga_unit = [(idx[LOAD_NODE], 0.0, -1.0)]
 
     try:
-        x = np.linalg.solve(A_eq, b_eq)
+        axial_unit, _, _ = _AppUtils().calcular_reacoes_e_forcas(
+            nos_arr, barras_arr, angulos,
+            forcas_externas=carga_unit,
+            forcas_virtuais=carga_unit,
+        )
     except np.linalg.LinAlgError:
         raise ValueError("Sistema singular: geometria instável.")
 
-    return x[:n_bars], lengths
+    return axial_unit, lengths
 
 
 def ptv_displacement_unit(axial_unit: np.ndarray, lengths: np.ndarray, areas: np.ndarray) -> float:
@@ -194,12 +183,20 @@ def mass_g(lengths_m: np.ndarray, sections: np.ndarray) -> float:
     return RHO * volume * 1000.0
 
 
-def bar_capacity(unit_axial_n: float, n_sticks: int) -> float:
-    """Capacidade da barra (N): tração → σt·A; compressão → σc·A  (R7/R8, Sg=2)."""
-    area = section_area(n_sticks)
+def bar_capacity(unit_axial_n: float, n_sticks: int, length_m: float) -> float:
+    """
+    Capacidade da barra (N).
+    Tração    : σt_adm × A
+    Compressão: min(σc_adm × A,  Euler)
+      Euler = n × π²·E·I_palito / L²  — palitos flambam em paralelo (∝ n),
+      pois a cola PVA não garante seção monolítica sob flambagem.
+    """
+    area          = section_area(n_sticks)
     if unit_axial_n > 0.0:
         return SIGMA_T_ALLOW * area
-    return SIGMA_C_ALLOW * area
+    inertia_single = B * T ** 3 / 12.0
+    euler          = n_sticks * math.pi ** 2 * E * inertia_single / length_m ** 2
+    return min(SIGMA_C_ALLOW * area, euler)
 
 
 def evaluate(ind: Individual) -> Individual:
@@ -238,7 +235,7 @@ def evaluate(ind: Individual) -> Individual:
     for i, coeff in enumerate(axial_unit):
         if abs(coeff) < 1e-12:
             continue
-        cap = bar_capacity(float(coeff), int(ind.n[i]))
+        cap = bar_capacity(float(coeff), int(ind.n[i]), float(lengths_m[i]))
         rupture[i] = cap / abs(coeff)
 
     load_n = float(np.min(rupture))
@@ -520,150 +517,67 @@ def print_report_builder(best: Individual) -> None:
 
     print(f"\n{SEP}")
     print("  RELATÓRIO DE CONSTRUÇÃO — TRELIÇA HOWE DE PALITOS".center(W))
-    print("  Atividade 9  |  EST/UEA  |  Algoritmos de Otimização".center(W))
     print(SEP)
 
-    # ── 0. Material ───────────────────────────────────────────────────────────
-    print(f"\n  MATERIAL")
-    print(f"  {'Madeira':25s}: Bétula (palito de picolé)")
-    print(f"  {'E':25s}: 3 500 MPa")
-    print(f"  {'ρ':25s}: 510 kg/m³")
-    print(f"  {'σt admissível (Sg=2)':25s}: {_SIGMA_T_ADM_MPA} MPa")
-    print(f"  {'σc admissível (Sg=2)':25s}: {_SIGMA_C_ADM_MPA} MPa")
-    print(f"  {'Dimensões do palito':25s}: {_STICK_LEN_CM} cm × {_B_CM} cm × {_T_CM} cm")
-
-    # ── 1. Geometria ──────────────────────────────────────────────────────────
-    print(f"\n{sep}")
-    print("  1. GEOMETRIA")
-    print(sep)
-    print(f"\n  Painéis (p1…p4) : {' | '.join(f'{v:.3f} cm' for v in p)}"
-          f"   →  Σ = {sum(p):.1f} cm")
-    print(f"  Alturas (h1…h5) : {' | '.join(f'{v:.3f} cm' for v in h)}")
-
-    print(f"\n  {'Nó':>3}  {'x (cm)':>8}  {'y (cm)':>8}  Nível")
-    print(f"  {'---':>3}  {'--------':>8}  {'--------':>8}  --------")
+    # ── Geometria ─────────────────────────────────────────────────────────────
+    print(f"\n  Painéis (p1…p4) : {' | '.join(f'{v:.3f}' for v in p)} cm   Σ = {sum(p):.1f} cm")
+    print(f"  Alturas (h1…h5) : {' | '.join(f'{v:.3f}' for v in h)} cm")
+    print(f"\n  {'Nó':>3}  {'x (cm)':>8}  {'y (cm)':>8}")
+    print(f"  {'─'*3}  {'─'*8}  {'─'*8}")
     for nm, (xn, yn) in nós.items():
-        nivel = "Banzo inferior" if yn == 0.0 else "Banzo superior"
-        print(f"  {nm:>3}  {xn:8.3f}  {yn:8.3f}  {nivel}")
+        print(f"  {nm:>3}  {xn:8.3f}  {yn:8.3f}")
 
-    # ── 2. Inventário de barras ───────────────────────────────────────────────
+    # ── Inventário ────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print("  2. INVENTÁRIO DE BARRAS")
-    print(sep)
-    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'L (cm)':>7}  {'n':>2}  {'A (cm²)':>7}  {'Palitos':>7}")
+    print(f"  {'Barra':>5}  {'Tipo':18}  {'L (cm)':>7}  {'n':>2}  {'A (cm²)':>7}  {'Palitos':>7}")
     print(f"  {'─'*5}  {'─'*18}  {'─'*7}  {'─'*2}  {'─'*7}  {'─'*7}")
     for row in inv:
         print(f"  {row['bar']:>5}  {row['tipo']:18}  {row['L']:7.3f}  "
               f"{row['n']:>2}  {row['area_cm2']:7.4f}  {row['phys']:>7}")
+    print(f"\n  Palitos físicos: {total_phys}  "
+          f"(comprar {int(total_phys * 1.15) + 1} com folga de 15 %)")
 
-    print(f"\n  Total de palitos físicos: {total_phys}")
-    print(f"  Recomenda-se comprar {int(total_phys * 1.15) + 1} (+15 % de folga para erros de corte).")
-
-    emendas = [r for r in inv if r["segs"] > 1]
-    if emendas:
-        print(f"\n  Barras com emenda (L > {_STICK_LEN_CM} cm):")
-        for r in emendas:
-            print(f"    {r['bar']:>5}  {r['L']:.3f} cm  →  "
-                  f"{r['segs']} palitos em série × {r['n']} camada(s) = {r['phys']} palitos")
-
-    # ── 3. Esforços e verificação ─────────────────────────────────────────────
+    # ── Esforços ──────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print(f"  3. ESFORÇOS NA CARGA DE RUPTURA  (P = {load_kg:.4f} kg  /  {load_n:.2f} N)")
-    print(sep)
-    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'N (N)':>9}  "
-          f"{'σ (MPa)':>8}  {'σadm':>6}  {'FS':>5}  Estado")
-    print(f"  {'─'*5}  {'─'*18}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*5}  ──────────")
-    for bar, ni, L, nr, st in zip(BAR_NAMES, n_arr, lengths_cm, axial_real, stresses):
+    print(f"  ESFORÇOS  —  P ruptura = {load_kg:.4f} kg  ({load_n:.2f} N)")
+    print(f"\n  {'Barra':>5}  {'N (N)':>9}  {'σ (MPa)':>8}  {'FS':>5}  Estado")
+    print(f"  {'─'*5}  {'─'*9}  {'─'*8}  {'─'*5}  ─────────")
+    for bar, nr, st in zip(BAR_NAMES, axial_real, stresses):
         if abs(nr) < 1e-9:
             estado = "zero      "; σadm = _SIGMA_T_ADM_MPA; fs_s = "  —  "
         elif nr > 0:
             estado = "tração    "; σadm = _SIGMA_T_ADM_MPA
-            fs_s = f"{σadm / abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
+            fs_s = f"{σadm/abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
         else:
             estado = "compressão"; σadm = _SIGMA_C_ADM_MPA
-            fs_s = f"{σadm / abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
-        ok = "OK" if abs(st) <= σadm + 1e-6 else "VIOLA"
-        print(f"  {bar:>5}  {_BAR_TYPE.get(bar,''):18}  {nr:+9.2f}  "
-              f"{st:+8.3f}  {σadm:>6.1f}  {fs_s:>5}  {estado} [{ok}]")
+            fs_s = f"{σadm/abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
+        ok = "" if abs(st) <= σadm + 1e-6 else " ← VIOLA"
+        print(f"  {bar:>5}  {nr:+9.2f}  {st:+8.3f}  {fs_s:>5}  {estado}{ok}")
 
-    # ── 4. Resultados globais ─────────────────────────────────────────────────
+    # ── Resultados ────────────────────────────────────────────────────────────
     print(f"\n{sep}")
-    print("  4. RESULTADOS GLOBAIS")
-    print(sep)
     sticks_gene = int(sum(n_arr))
-    print(f"\n  {'Massa total':35s}: {m_g:.4f} g")
-    print(f"  {'Carga de ruptura teórica':35s}: {load_kg:.4f} kg")
-    print(f"  {'Fitness (carga/massa)':35s}: {best.fitness:.6f} kg/g")
-    print(f"  {'Deslocamento Δ_C na ruptura':35s}: {delta_mm:.4f} mm")
-    print(f"  {'Barra crítica':35s}: {crit}  ({_BAR_TYPE.get(crit,'')})")
-    print(f"  {'Σni (R5 ≤ 150)':35s}: {sticks_gene}  "
-          f"{'[OK]' if sticks_gene <= 150 else '[VIOLA]'}")
-    print(f"  {'Palitos físicos estimados':35s}: {total_phys}")
-    print(f"  {'Solução viável':35s}: {'Sim ✓' if best.feasible else 'Não ✗'}")
+    print(f"  Carga de ruptura : {load_kg:.4f} kg")
+    print(f"  Massa total      : {m_g:.4f} g")
+    print(f"  Fitness          : {best.fitness:.6f} kg/g")
+    print(f"  Δ_C na ruptura   : {delta_mm:.4f} mm")
+    print(f"  Barra crítica    : {crit}  ({_BAR_TYPE.get(crit,'')})")
+    print(f"  Palitos R5       : {sticks_gene}/150  {'[OK]' if sticks_gene<=150 else '[VIOLA]'}")
+    print(f"  Viável           : {'Sim' if best.feasible else 'Não'}")
     if not best.feasible:
         for r in d.get("penalty_reasons", []):
             print(f"    ✗ {r}")
 
-    # ── 5. Lista de cortes ────────────────────────────────────────────────────
-    print(f"\n{sep}")
-    print("  5. GUIA DE CORTE")
-    print(sep)
-    inteiros  = [r for r in inv if abs(r["L"] - _STICK_LEN_CM) < 0.05]
-    a_cortar  = [r for r in inv if r["L"] < _STICK_LEN_CM - 0.05]
-    if inteiros:
-        print(f"\n  Barras que usam palito INTEIRO ({_STICK_LEN_CM} cm):")
-        for r in inteiros:
-            print(f"    {r['bar']:>5}  ({r['tipo']})  —  {r['n']} camada(s)")
+    # ── Cortes ────────────────────────────────────────────────────────────────
+    a_cortar = [r for r in inv if r["L"] < _STICK_LEN_CM - 0.05]
     if a_cortar:
-        print(f"\n  Barras que exigem CORTE:")
-        print(f"    {'Barra':>5}  {'Comprimento':>12}  {'Corte por palito':>16}  Camadas")
+        print(f"\n{sep}")
+        print(f"  CORTES  (palito inteiro = {_STICK_LEN_CM} cm)")
+        print(f"  {'Barra':>5}  {'L (cm)':>7}  {'retirar':>8}  Camadas")
         for r in a_cortar:
-            sobra = _STICK_LEN_CM - r["L"]
-            print(f"    {r['bar']:>5}  {r['L']:>10.3f} cm  "
-                  f"retirar {sobra:.3f} cm  {r['n']:>7} camada(s)")
-
-    # ── 6. Montagem ───────────────────────────────────────────────────────────
-    print(f"\n{sep}")
-    print("  6. SEQUÊNCIA DE MONTAGEM RECOMENDADA")
-    print(sep)
-    print(f"""
-  MATERIAIS:
-    • {int(total_phys * 1.15) + 1} palitos de picolé (Bétula, {_STICK_LEN_CM} × {_B_CM} × {_T_CM} cm)
-    • Cola de madeira (PVA branco ou cianoacrilato)
-    • Régua de aço, esquadro 90°, estilete
-    • Base plana (isopor ou MDF) com papel milimetrado como gabarito
-    • Prendedores / clips enquanto a cola seca
-
-  PASSO A PASSO:
-    1. Imprima ou trace o diagrama com as coordenadas acima em papel milimetrado
-       colado sobre uma base plana — isso serve de gabarito.
-    2. Corte todos os palitos nas dimensões do Guia de Corte antes de montar.
-       Lixe as extremidades para encaixes precisos.
-    3. Monte o BANZO INFERIOR alinhando-o pela base do gabarito:
-         A─B ({p[0]:.2f} cm)  →  B─C ({p[1]:.2f} cm)  →  C─D ({p[2]:.2f} cm)  →  D─E ({p[3]:.2f} cm)
-    4. Instale as VERTICAIS EXTERNAS (A─F e E─J), perpendiculares ao banzo.
-       Fixe com cola; aguarde ≥ 5 min antes de continuar.
-    5. Instale as VERTICAIS INTERNAS (G─B, H─C, I─D).
-       G─B e I─D em tração — atenção ao alinhamento vertical.
-    6. Instale o BANZO SUPERIOR (F─G, G─H, H─I, I─J).
-       Use o gabarito para conferir as alturas dos nós F, G, H, I, J.
-    7. Instale as DIAGONAIS por último (F─B, G─C, I─C, J─D).
-       Cada diagonal cabe em 1 palito inteiro — confirme antes de colar.
-    8. Para barras com n > 1: cole as camadas face a face sob pressão uniforme;
-       aguarde cura completa (≥ 30 min) antes de carregar.
-
-  PONTOS CRÍTICOS:
-    • Nó C (x = {x_nós[2]:.2f} cm) = ponto de carga — reforce as junções das 5 barras.
-    • Barra crítica: {crit} ({_BAR_TYPE.get(crit,'')}) — inspecione cuidadosamente.
-    • Vão livre entre apoios: exactamente 40,0 cm.
-    • Apoio A = pino fixo (x e y); Apoio E = rolete (só y).
-    • Pese a treliça pronta antes do ensaio; valor previsto: {m_g:.2f} g.
-    • Diferença > 30 % entre carga real e teórica deve ser justificada.
-
-  PREVISÃO DO ENSAIO:
-    Carga de ruptura: {load_kg:.2f} kg    |    Eficiência: {best.fitness:.4f} kg/g
-""")
-    print(SEP)
+            print(f"  {r['bar']:>5}  {r['L']:7.3f}  {_STICK_LEN_CM-r['L']:8.3f} cm"
+                  f"  {r['n']} camada(s)")
+    print(f"\n{SEP}")
 
 
 if __name__ == "__main__":
