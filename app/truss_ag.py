@@ -2,334 +2,191 @@ import numpy as np
 import random
 from app.utils import Utils
 
+class TrussPalitoAG:
+    def __init__(self, tam_populacao=150, num_geracoes=200, p_mutacao=0.20, p_crossover=0.85):
+        self.tam_populacao  = tam_populacao
+        self.num_geracoes   = num_geracoes
+        self.p_mutacao      = p_mutacao
+        self.p_crossover    = p_crossover
+        self.utils          = Utils()
+        self.num_barras     = 17
+        self.num_nos        = 10  # travamentos: 1 por nó
+        self.tam_cromossomo = 27  # 4 bases + 5 alturas + 17 seções + 1 trav
 
-class TrussAG:
-    def __init__(
-        self,
-        forcas_externas: list[list[float]],
-        forcas_virtuais: list[list[float]],
-        barras_base: int = 4,
-        barras_verticais: int = 3,
-        barras_total: int = 13,
-        E_GPa: float = 200.0,
-        densidade: float = 7870.0,
-        sigma_escoamento: float = 300.0,
-        fator_seguranca: float = 2.0,
-        vao_livre_min: float = 8.0,
-        tam_populacao: int = 100,
-        p_mutacao: float = 0.1,
-        p_crossover: float = 0.8,
-        num_geracoes: int = 100,
-        P1: float = 1e5,
-        P2: float = 1e5,
-    ):
-        self.forcas_externas = forcas_externas
-        self.forcas_virtuais = forcas_virtuais
-        self.barras_base = barras_base
-        self.barras_verticais = barras_verticais
-        self.barras_total = barras_total
-        self.E_GPa = E_GPa
-        self.densidade = densidade
-        self.sigma_escoamento = sigma_escoamento
-        self.fator_seguranca = fator_seguranca
-        self.sigma_admissivel = sigma_escoamento / fator_seguranca
-        self.vao_livre_min = vao_livre_min
-        self.tam_populacao = tam_populacao
-        self.p_mutacao = p_mutacao
-        self.p_crossover = p_crossover
-        self.num_geracoes = num_geracoes
-        self.P1 = P1
-        self.P2 = P2
-        self.utils = Utils()
-        self.comprimentos_disponiveis = [1.0, 2.0, 3.0]
-        self.areas_disponiveis = [3e-4, 4e-4, 5e-4]
-        self.tam_cromossomo = self.barras_base + self.barras_verticais + self.barras_total
-        self.populacao = [self.gerar_cromossomo() for _ in range(self.tam_populacao)]
-        self.historico_nuvem = []
-        self.historico_fronteira_plot = []
-        self.historico_melhor_cromossomo = []
-        self.historico_melhor_obj = []
+        # Constantes físicas
+        self.E_Pa        = 3500 * 1e6
+        self.rho         = 510.0
+        self.sigma_t_adm = (55.0 * 1e6) / 2.0
+        self.sigma_c_adm = (35.0 * 1e6) / 2.0
 
-    def iniciar(self):
-        for gen in range(self.num_geracoes):
-            objetivos = [self.fitness(ind) for ind in self.populacao]
-
-            nuvem = []
-            for ind in self.populacao:
-                try:
-                    massa, delta, factivel = self.avaliar_objetivos(ind)
-                    nuvem.append([massa, delta, 1.0 if factivel else 0.0])
-                except Exception:
-                    pass
-            self.historico_nuvem.append(nuvem)
-
-            fronteira_plot = self.fronteira_factivel_real(self.populacao)
-            self.historico_fronteira_plot.append(fronteira_plot)
-
-            melhor_cromossomo = self.melhor_solucao(self.populacao)
-            try:
-                massa_b, delta_b = self.massa_e_deslocamento(melhor_cromossomo)
-            except Exception:
-                massa_b, delta_b = 0.0, 0.0
-            self.historico_melhor_cromossomo.append(melhor_cromossomo.copy())
-            self.historico_melhor_obj.append([massa_b, delta_b])
-
-            print(f"Geracao {gen + 1} | Pontos na Fronteira factivel: {len(fronteira_plot)} | Melhor m: {massa_b:.2f} kg | delta_C: {delta_b:.3f} mm")
-
-            frentes, ranks = self.ordenar_nao_dominado(objetivos)
-            crowding = [0.0] * len(self.populacao)
-            for frente in frentes:
-                dist = self.distancia_aglomeracao(frente, objetivos)
-                for idx in frente:
-                    crowding[idx] = dist[idx]
-
-            filhos = []
-            while len(filhos) < self.tam_populacao:
-                pai = self.torneio(ranks, crowding)
-                mae = self.torneio(ranks, crowding)
-                primogenito, ultimogenito = self.crossover(pai, mae)
-                self.mutar(primogenito)
-                self.mutar(ultimogenito)
-                filhos.append(primogenito)
-                if len(filhos) < self.tam_populacao:
-                    filhos.append(ultimogenito)
-
-            obj_filhos = [self.fitness(ind) for ind in filhos]
-            combinada = self.populacao + filhos
-            obj_comb = objetivos + obj_filhos
-
-            frentes_c, _ = self.ordenar_nao_dominado(obj_comb)
-            nova_populacao = []
-            for frente in frentes_c:
-                if len(nova_populacao) + len(frente) <= self.tam_populacao:
-                    nova_populacao.extend(combinada[idx] for idx in frente)
-                else:
-                    dist = self.distancia_aglomeracao(frente, obj_comb)
-                    ordenado = sorted(frente, key=lambda idx: dist[idx], reverse=True)
-                    faltam = self.tam_populacao - len(nova_populacao)
-                    nova_populacao.extend(combinada[idx] for idx in ordenado[:faltam])
-                    break
-            self.populacao = [ind.copy() for ind in nova_populacao]
-
-        objetivos_finais = [self.fitness(ind) for ind in self.populacao]
-        fronteira_final, _ = self.obter_fronteira_pareto(self.populacao, objetivos_finais)
-
-        return (
-            fronteira_final,
-            self.historico_melhor_cromossomo,
-            self.historico_nuvem,
-            self.historico_melhor_obj,
-            self.historico_fronteira_plot,
-        )
-
-    def decodificar_cromossomo(self, cromossomo: np.ndarray):
-        l_bases = cromossomo[0:self.barras_base]
-        l_verticais = cromossomo[self.barras_base:self.barras_base + self.barras_verticais]
-        vetor_areas = cromossomo[self.barras_base + self.barras_verticais:]
-
-        return l_bases, l_verticais, vetor_areas
-
-    def calcular_deslocamento(self, cromossomo: np.ndarray):
-        l_bases, l_verticais, vetor_areas = self.decodificar_cromossomo(cromossomo)
-
-        nos, barras, comprimentos, angulos = self.utils.calcular_comprimentos_howe(l_bases, l_verticais)
-        f_real, reacoes_reais, f_virtual = self.utils.calcular_reacoes_e_forcas(nos, barras, angulos, self.forcas_externas, self.forcas_virtuais)
-        resultados, deslocamento_total = self.utils.calcular_deslocamento_virtual(barras, comprimentos, vetor_areas, f_real, f_virtual, self.E_GPa)
-
-        return f_real, resultados, deslocamento_total, comprimentos, vetor_areas
-
-    def massa_e_deslocamento(self, cromossomo: np.ndarray):
-        f_real, _, deslocamento_total, comprimentos, vetor_areas = self.calcular_deslocamento(cromossomo)
-        massa = self.densidade * sum(L * A for L, A in zip(comprimentos, vetor_areas))
-        return massa, abs(deslocamento_total)
-
-    def avaliar_objetivos(self, cromossomo: np.ndarray):
-        f_real, _, deslocamento_total, comprimentos, vetor_areas = self.calcular_deslocamento(cromossomo)
-        massa = self.densidade * sum(L * A for L, A in zip(comprimentos, vetor_areas))
-        delta = abs(deslocamento_total)
-        penalidade = self.calcular_penalidades(cromossomo, f_real, vetor_areas)
-        return massa, delta, penalidade <= 1e-9
-
-    def calcular_penalidades(self, cromossomo: np.ndarray, f_real, vetor_areas):
-        tensoes_MPa = [abs(N) / A / 1000.0 for N, A in zip(f_real, vetor_areas)]
-        viol_tensao = sum(max(0.0, t - self.sigma_admissivel) for t in tensoes_MPa)
-
-        l_bases, _, _ = self.decodificar_cromossomo(cromossomo)
-        vao = float(sum(l_bases))
-        viol_vao = max(0.0, self.vao_livre_min - vao)
-
-        return self.P1 * viol_tensao + self.P2 * viol_vao
-
-    def fitness(self, cromossomo: np.ndarray):
-        try:
-            f_real, _, deslocamento_total, comprimentos, vetor_areas = self.calcular_deslocamento(cromossomo)
-        except Exception:
-            return 1e12, 1e12
-
-        massa = self.densidade * sum(L * A for L, A in zip(comprimentos, vetor_areas))
-        delta_c = abs(deslocamento_total)
-
-        penalidade = self.calcular_penalidades(cromossomo, f_real, vetor_areas)
-
-        f1 = massa + penalidade
-        f2 = delta_c + penalidade
-
-        return f1, f2
-
-    def avaliar_completo(self, cromossomo: np.ndarray):
-        f_real, resultados, deslocamento_total, comprimentos, vetor_areas = self.calcular_deslocamento(cromossomo)
-        massa = self.densidade * sum(L * A for L, A in zip(comprimentos, vetor_areas))
-        tensoes_MPa = [abs(N) / A / 1000.0 for N, A in zip(f_real, vetor_areas)]
-        l_bases, l_verticais, _ = self.decodificar_cromossomo(cromossomo)
-
-        return {
-            'deslocamento_C_mm': abs(deslocamento_total),
-            'massa_kg': massa,
-            'areas_m2': [float(a) for a in vetor_areas],
-            'comprimentos_m': [float(c) for c in comprimentos],
-            'forcas_kN': [float(n) for n in f_real],
-            'tensoes_MPa': tensoes_MPa,
-            'vao_livre_m': float(sum(l_bases)),
-            'sigma_admissivel_MPa': self.sigma_admissivel,
-        }
-
-    def fronteira_factivel_real(self, populacao):
-        pontos = []
-        for ind in populacao:
-            try:
-                massa, delta, factivel = self.avaliar_objetivos(ind)
-                if factivel:
-                    pontos.append((massa, delta))
-            except Exception:
-                continue
-        nao_dominados = []
-        for i, (mi, di) in enumerate(pontos):
-            dominado = False
-            for j, (mj, dj) in enumerate(pontos):
-                if i != j and mj <= mi and dj <= di and (mj < mi or dj < di):
-                    dominado = True
-                    break
-            if not dominado:
-                nao_dominados.append((mi, di))
-        nao_dominados = sorted(set(nao_dominados))
-        return [[m, d] for m, d in nao_dominados]
-
-    def melhor_solucao(self, candidatos):
-        melhor = None
-        melhor_score = np.inf
-        for ind in candidatos:
-            try:
-                massa, delta = self.massa_e_deslocamento(ind)
-                f_real, _, _, _, vetor_areas = self.calcular_deslocamento(ind)
-                penal = self.calcular_penalidades(ind, f_real, vetor_areas)
-                score = 0.1 * massa + delta + penal
-                if score < melhor_score:
-                    melhor_score = score
-                    melhor = ind
-            except Exception:
-                continue
-        if melhor is None:
-            melhor = candidatos[0]
-        return melhor
-
-    def torneio(self, ranks, crowding):
-        a, b = random.sample(range(len(self.populacao)), 2)
-        if ranks[a] < ranks[b]:
-            vencedor = a
-        elif ranks[b] < ranks[a]:
-            vencedor = b
-        else:
-            vencedor = a if crowding[a] >= crowding[b] else b
-        return self.populacao[vencedor].copy()
-
-    def dominante(self, obj_a, obj_b):
-        return (obj_a[0] <= obj_b[0] and obj_a[1] <= obj_b[1]) and (obj_a[0] < obj_b[0] or obj_a[1] < obj_b[1])
-
-    def ordenar_nao_dominado(self, objetivos):
-        n = len(objetivos)
-        dominados_por = [[] for _ in range(n)]
-        contador_dominacao = [0] * n
-        rank = [0] * n
-        frentes = [[]]
-
-        for p in range(n):
-            for q in range(n):
-                if p == q:
-                    continue
-                if self.dominante(objetivos[p], objetivos[q]):
-                    dominados_por[p].append(q)
-                elif self.dominante(objetivos[q], objetivos[p]):
-                    contador_dominacao[p] += 1
-            if contador_dominacao[p] == 0:
-                rank[p] = 0
-                frentes[0].append(p)
-
-        i = 0
-        while frentes[i]:
-            proxima = []
-            for p in frentes[i]:
-                for q in dominados_por[p]:
-                    contador_dominacao[q] -= 1
-                    if contador_dominacao[q] == 0:
-                        rank[q] = i + 1
-                        proxima.append(q)
-            i += 1
-            frentes.append(proxima)
-        frentes.pop()
-        return frentes, rank
-
-    def distancia_aglomeracao(self, frente, objetivos):
-        dist = {idx: 0.0 for idx in frente}
-        tamanho = len(frente)
-        if tamanho == 0:
-            return dist
-        for m in range(2):
-            ordenado = sorted(frente, key=lambda idx: objetivos[idx][m])
-            dist[ordenado[0]] = float('inf')
-            dist[ordenado[-1]] = float('inf')
-            f_min = objetivos[ordenado[0]][m]
-            f_max = objetivos[ordenado[-1]][m]
-            faixa = f_max - f_min
-            if faixa == 0:
-                continue
-            for k in range(1, tamanho - 1):
-                dist[ordenado[k]] += (objetivos[ordenado[k + 1]][m] - objetivos[ordenado[k - 1]][m]) / faixa
-        return dist
-
-    def obter_fronteira_pareto(self, populacao, avaliacoes):
-        fronteira = []
-        avaliacoes_fronteira = []
-        for i in range(len(populacao)):
-            foi_dominado = False
-            for j in range(len(populacao)):
-                if i != j and self.dominante(avaliacoes[j], avaliacoes[i]):
-                    foi_dominado = True
-                    break
-            if not foi_dominado:
-                fronteira.append(populacao[i])
-                avaliacoes_fronteira.append(avaliacoes[i])
-        return fronteira, avaliacoes_fronteira
+        # Geometria do palito (metros)
+        self.L_max_palito   = 0.114
+        self.area_palito_m2 = 0.010 * 0.002  # 2e-5 m²
 
     def gerar_cromossomo(self):
-        l_bases = [random.choice(self.comprimentos_disponiveis) for _ in range(self.barras_base)]
-        l_verticais = [random.choice(self.comprimentos_disponiveis) for _ in range(self.barras_verticais)]
-        areas = [random.choice(self.areas_disponiveis) for _ in range(self.barras_total)]
+        for _ in range(10000):
+            geom_bases = [random.uniform(0.03, 0.114) for _ in range(4)]
+            soma = sum(geom_bases)
+            if soma > 0:
+                geom_bases = [(v / soma) * 0.40 for v in geom_bases]
+            # calcula via Pitágoras a altura máxima que cada montante pode assumir sem estourar o tamanho do palito
+            h_maximos = [
+                np.sqrt(max(0.0, self.L_max_palito**2 - geom_bases[0]**2)),
+                np.sqrt(max(0.0, self.L_max_palito**2 - geom_bases[1]**2)),
+                self.L_max_palito,
+                np.sqrt(max(0.0, self.L_max_palito**2 - geom_bases[2]**2)),
+                np.sqrt(max(0.0, self.L_max_palito**2 - geom_bases[3]**2)),
+            ]
 
-        cromossomo = l_bases + l_verticais + areas
-        return np.array(cromossomo, dtype=float)
+            if any(hm < 0.03 for hm in h_maximos):
+                continue
+           
+            # sorteia alturas reais abaixo do limite calculado
+            geom_alturas = [random.uniform(0.03, hm) for hm in h_maximos]
+            # escolha discreta de palitos por barra: 1, 2 ou 3 palitos
+            secoes       = [float(random.choice([1, 2, 3])) for _ in range(17)]
+            # espessura do travamento tridimensional entre as duas faces da ponte
+            n_trav       = [float(random.choice([1, 2, 3]))]
+            return np.array(geom_bases + geom_alturas + secoes + n_trav, dtype=float)
+        # segurança estrutural caso falhe o sorteio
+        return np.array([0.10, 0.10, 0.10, 0.10, 0.04, 0.04, 0.04, 0.04, 0.04] + [1.0] * 17 + [1.0], dtype=float)
 
-    def crossover(self, pai: np.ndarray, mae: np.ndarray):
-        if np.random.rand() < self.p_crossover:
-            ponto = np.random.randint(1, self.tam_cromossomo - 1)
-            primogenito = np.concatenate([pai[:ponto], mae[ponto:]])
-            ultimogenito = np.concatenate([mae[:ponto], pai[ponto:]])
-            return primogenito, ultimogenito
-        return pai.copy(), mae.copy()
+    def decodificar(self, cromossomo):
+        l_bases     = cromossomo[0:4].copy()
+        l_verticais = cromossomo[4:9].copy()
+        secoes_num  = np.round(cromossomo[9:26]).astype(int)
+        secoes_num  = np.clip(secoes_num, 1, 3)
+        n_trav      = int(np.clip(round(cromossomo[26]), 1, 3))
 
-    def mutar(self, individuo: np.ndarray):
+        # soma do vão = 40 cm
+        soma_p = sum(l_bases)
+        if soma_p > 0:
+            l_bases = (l_bases / soma_p) * 0.40
+        else:
+            l_bases = np.array([0.10, 0.10, 0.10, 0.10])
+
+        return l_bases, l_verticais, secoes_num, n_trav
+
+    def avaliar_indivíduo(self, cromossomo):
+        l_bases, l_verticais, secoes_num, n_trav = self.decodificar(cromossomo)
+       
+        # garantir que nenhuma base ou altura esteja fora dos limites físicos do palito
+        if any(p < 0.03 or p > 0.114 for p in l_bases):
+            return 0.0, 9999.0, 0.0, False
+        if any(h < 0.03 or h > 0.114 for h in l_verticais):
+            return 0.0, 9999.0, 0.0, False
+
+        nos, barras, comprimentos, angulos = \
+            self.utils.calcular_comprimentos_howe_3d(l_bases, l_verticais)
+
+        if any(L > self.L_max_palito + 1e-9 for L in comprimentos):
+            return 0.0, 9999.0, 0.0, False
+
+        # total de palitos = 2 faces + travamentos (10 nós × n_trav)
+        total_palitos = sum(secoes_num) * 2 + self.num_nos * n_trav
+        # máximo de 150 palitos
+        if total_palitos > 150:
+            return 0.0, 9999.0, 0.0, False
+
+        vetor_areas   = secoes_num * self.area_palito_m2
+        largura_w_m = n_trav * 0.010 # largura do travamento (1 cm por palito)
+
+        # massa: 2 faces + travamentos
+        massa_faces_kg = self.rho * sum(L * A for L, A in zip(comprimentos, vetor_areas))
+        area_trav      = n_trav * self.area_palito_m2
+        massa_trav_kg  = self.rho * self.num_nos * largura_w_m * area_trav
+        massa_total_g  = (massa_faces_kg * 2.0 + massa_trav_kg) * 1000.0
+
+        # elimina soluções muito pesadas
+        if massa_total_g > 400.0:
+            return 0.0, 9999.0, 0.0, False
+
+        try:
+            # forças reais e virtuais para o cálculo do deslocamento no nó C (0.5N em cada face)
+            f_reais    = self.utils.resolver_estatica(nos, barras, angulos, [(2, 0.0, -0.5)])
+            f_virtuais = self.utils.resolver_estatica(nos, barras, angulos, [(2, 0.0, -0.5)])
+        except (np.linalg.LinAlgError, ValueError):
+            return 0.0, 9999.0, 0.0, False
+       
+        # encontra qual das 17 barras vai estourar primeiro por tensão admissível
+        P_ruptura_sistema_N = np.inf
+        for k in range(self.num_barras):
+            f_u = f_reais[k]
+            if abs(f_u) < 1e-6:
+                continue
+            # escolhe o limite de ruptura baseado no sentido do esforço (Tração vs Compressão)
+            F_adm   = self.sigma_t_adm * vetor_areas[k] if f_u > 0 \
+                      else self.sigma_c_adm * vetor_areas[k]
+            P_barra = F_adm / abs(f_u)
+            if P_barra < P_ruptura_sistema_N:
+                P_ruptura_sistema_N = P_barra # o sistema quebra no elo mais fraco
+
+        P_ruptura_kg = (P_ruptura_sistema_N * 2.0) / 9.81 # converte a capacidade de Newton para quilogramas força
+
+        f_real_limite = f_reais * P_ruptura_sistema_N
+        desl_m = self.utils.calcular_deslocamento_ptv(
+            barras, comprimentos, vetor_areas,
+            f_real_limite, f_virtuais, self.E_Pa
+        )
+        deslocamento_mm = abs(desl_m) * 1000.0
+
+        return P_ruptura_kg, massa_total_g, deslocamento_mm, True
+
+    def fitness(self, cromossomo):
+        # Objetivo 1: Maximizar Carga de Ruptura
+        # Objetivo 2: Minimizar Peso Total (Massa)
+        P_rup, m_total, _, viavel = self.avaliar_indivíduo(cromossomo)
+        if not viavel or P_rup <= 0:
+            return (0.0, 9999.0)
+        return (-P_rup, m_total)
+
+    def dominante(self, a, b):
+        # indivíduo 'a' domina o 'b' se ele for melhor
+        # ou igual em todos os objetivos e estritamente superior em pelo menos um deles
+        return (a[0] <= b[0] and a[1] <= b[1]) and \
+               (a[0] <  b[0] or  a[1] <  b[1])
+
+    def fronteira_pareto(self, populacao):
+        scores    = [self.fitness(ind) for ind in populacao]
+        factiveis = [(i, s) for i, s in enumerate(scores) if s[1] < 9999.0]
+        nd = []
+        for i, si in factiveis:
+            dominado = any(
+                self.dominante(sj, si)
+                for j, sj in factiveis if j != i
+            )
+            if not dominado:
+                nd.append(i)
+        return nd, scores
+
+    def torneio_pareto(self, populacao, scores):
+        i1, i2 = random.sample(range(len(populacao)), 2)
+        s1, s2  = scores[i1], scores[i2]
+        if self.dominante(s1, s2):
+            return populacao[i1].copy()
+        elif self.dominante(s2, s1):
+            return populacao[i2].copy()
+        else:
+            return populacao[i1].copy() if s1[1] <= s2[1] else populacao[i2].copy()
+
+    def crossover(self, pai, mae):
+        if random.random() >= self.p_crossover:
+            return pai.copy(), mae.copy()
+        ponto = random.randint(1, self.tam_cromossomo - 1)
+        f1 = np.concatenate([pai[:ponto], mae[ponto:]])
+        f2 = np.concatenate([mae[:ponto], pai[ponto:]])
+        return f1, f2
+
+    def mutar(self, individuo):
         for i in range(self.tam_cromossomo):
-            if np.random.rand() < self.p_mutacao:
-                if i < self.barras_base + self.barras_verticais:
-                    individuo[i] = random.choice(self.comprimentos_disponiveis)
-                else:
-                    individuo[i] = random.choice(self.areas_disponiveis)
+            if random.random() < self.p_mutacao:
+                if i < 4:        # painéis
+                    individuo[i] += random.gauss(0, 0.005)
+                    individuo[i]  = max(0.03, min(0.114, individuo[i]))
+                elif i < 9:      # alturas
+                    individuo[i] += random.gauss(0, 0.005)
+                    individuo[i]  = max(0.03, min(0.114, individuo[i]))
+                elif i < 26:     # seções das barras
+                    individuo[i]  = float(random.choice([1, 2, 3]))
+                else:            # travamento
+                    individuo[i]  = float(random.choice([1, 2, 3]))
