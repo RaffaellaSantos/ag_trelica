@@ -1,0 +1,694 @@
+"""
+Algoritmo Genético para otimização de treliça Howe de 4 painéis com palitos.
+(Atividade 9 — extensão da treliça de aço da Atividade 8)
+
+Cromossomo (26 genes):
+- p1..p4 (contínuo): larguras dos painéis, em cm, com soma reparada para 40 cm
+- h1..h5 (contínuo): alturas das verticais, em cm
+- n1..n17 (discreto): palitos colados por barra, em {1, 2, 3}
+
+Análise estrutural (treliça plana):
+- Forças axiais: equilíbrio de nós com carga unitária no nó C (P = 1)
+- Deslocamento em C: Princípio dos Trabalhos Virtuais (PTV)
+- Como o sistema é linear, a força real em cada barra é P · n_i, onde n_i é a
+  força da carga unitária; por isso uma única análise resolve forças e PTV.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import math
+import random
+
+import numpy as np
+
+
+# =========================
+# Constantes do problema (PDF)
+# =========================
+
+G = 9.80665
+SPAN_CM = 40.0
+PANEL_MIN_CM, PANEL_MAX_CM = 3.0, 11.4
+HEIGHT_MIN_CM, HEIGHT_MAX_CM = 3.0, 11.4
+STICK_LENGTH_CM = 11.4
+MAX_STICKS = 150
+MAX_MASS_G = 600.0
+
+E = 3_500e6                 # Pa
+RHO = 510.0                 # kg/m³
+SIGMA_T_ALLOW = 55e6 / 2.0  # Pa (tração, Sg = 2)
+SIGMA_C_ALLOW = 35e6 / 2.0  # Pa (compressão, Sg = 2)
+B = 0.010                   # m, largura do palito
+T = 0.002                   # m, espessura de 1 palito
+LOAD_NODE = "C"
+DIAGONAL_INDICES = [13, 14, 15, 16]  # F-B, G-C, I-C, J-D (restrição R4)
+
+BAR_NAMES = [
+    "A-B", "B-C", "C-D", "D-E",        # 4 banzo inferior
+    "F-G", "G-H", "H-I", "I-J",        # 4 banzo superior
+    "A-F", "G-B", "H-C", "I-D", "E-J", # 5 verticais
+    "F-B", "G-C", "I-C", "J-D",        # 4 diagonais Howe
+]
+
+CONNECTIVITY = [
+    ("A", "B"), ("B", "C"), ("C", "D"), ("D", "E"),
+    ("F", "G"), ("G", "H"), ("H", "I"), ("I", "J"),
+    ("A", "F"), ("G", "B"), ("H", "C"), ("I", "D"), ("E", "J"),
+    ("F", "B"), ("G", "C"), ("I", "C"), ("J", "D"),
+]
+
+
+@dataclass
+class Individual:
+    p_cm: np.ndarray            # (4,) larguras dos painéis
+    h_cm: np.ndarray            # (5,) alturas das verticais
+    n: np.ndarray               # (17,) palitos por barra, em {1, 2, 3}
+    fitness: float = 0.0
+    feasible: bool = False
+    data: dict = field(default_factory=dict)
+
+
+# =========================
+# Geometria e propriedades
+# =========================
+
+def section_area(n_sticks: int) -> float:
+    """Área da seção com n palitos colados face a face, em m²."""
+    return B * (n_sticks * T)
+
+
+def repair_panels(p_cm: np.ndarray) -> np.ndarray:
+    """Ajusta p1..p4 para 3 <= pi <= 11,4 cm e soma = 40 cm (R1, R3)."""
+    p = np.clip(np.array(p_cm, dtype=float), PANEL_MIN_CM, PANEL_MAX_CM)
+    for _ in range(100):
+        diff = SPAN_CM - float(np.sum(p))
+        if abs(diff) < 1e-9:
+            break
+        if diff > 0:
+            free = p < PANEL_MAX_CM - 1e-12
+        else:
+            free = p > PANEL_MIN_CM + 1e-12
+        if not np.any(free):
+            break
+        p[free] += diff / np.sum(free)
+        p = np.clip(p, PANEL_MIN_CM, PANEL_MAX_CM)
+    return p
+
+
+def node_coords(p_cm: np.ndarray, h_cm: np.ndarray) -> dict[str, np.ndarray]:
+    """Coordenadas (x, y) dos 10 nós, em metros."""
+    p = p_cm / 100.0
+    h = h_cm / 100.0
+    x = [0.0, p[0], p[0] + p[1], p[0] + p[1] + p[2], SPAN_CM / 100.0]
+    return {
+        "A": np.array([x[0], 0.0]), "B": np.array([x[1], 0.0]),
+        "C": np.array([x[2], 0.0]), "D": np.array([x[3], 0.0]),
+        "E": np.array([x[4], 0.0]),
+        "F": np.array([x[0], h[0]]), "G": np.array([x[1], h[1]]),
+        "H": np.array([x[2], h[2]]), "I": np.array([x[3], h[3]]),
+        "J": np.array([x[4], h[4]]),
+    }
+
+
+# =========================
+# Análise: equilíbrio de nós + PTV
+# =========================
+
+def solve_axial_forces(nodes: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Equilíbrio de nós (método dos nós) sob carga unitária (1 N) para baixo em C.
+    Apoios: A (pino, x e y) e E (rolete, y). Convenção: positivo = tração.
+
+    Monta sistema linear 20×20:
+        A · [F1..F17, Ax, Ay, Ey]ᵀ = b
+    onde cada par de linhas representa ΣFx=0 e ΣFy=0 num nó.
+    Retorna (forças axiais unitárias, comprimentos das barras), ambos por barra.
+    """
+    n_bars = len(CONNECTIVITY)
+    names = list(nodes)
+    idx = {name: i for i, name in enumerate(names)}
+    n_nodes = len(names)
+
+    lengths = np.empty(n_bars)
+    cos_sin = np.empty((n_bars, 2))
+    for e, (na, nb) in enumerate(CONNECTIVITY):
+        d = nodes[nb] - nodes[na]
+        L = float(math.hypot(d[0], d[1]))
+        if L < 1e-12:
+            raise ValueError(f"Barra {BAR_NAMES[e]}: comprimento nulo.")
+        lengths[e] = L
+        cos_sin[e] = d[0] / L, d[1] / L
+
+    # x = [F0..F16, Ax, Ay, Ey]  →  20 incógnitas
+    n_unk = n_bars + 3
+    A_eq = np.zeros((2 * n_nodes, n_unk))
+    b_eq = np.zeros(2 * n_nodes)
+
+    # Contribuição de cada barra: tensão F puxa na em direção a nb (+ûe)
+    # e puxa nb em direção a na (−ûe).
+    for e, (na, nb) in enumerate(CONNECTIVITY):
+        cx, cy = cos_sin[e]
+        ia, ib = idx[na], idx[nb]
+        A_eq[2 * ia,     e] += cx
+        A_eq[2 * ia + 1, e] += cy
+        A_eq[2 * ib,     e] -= cx
+        A_eq[2 * ib + 1, e] -= cy
+
+    # Reações de apoio como incógnitas adicionais
+    A_eq[2 * idx["A"],     n_bars]     = 1.0  # Ax → ΣFx no nó A
+    A_eq[2 * idx["A"] + 1, n_bars + 1] = 1.0  # Ay → ΣFy no nó A
+    A_eq[2 * idx["E"] + 1, n_bars + 2] = 1.0  # Ey → ΣFy no nó E
+
+    # Carga externa: 1 N para baixo no nó de carga (passa para o lado direito)
+    b_eq[2 * idx[LOAD_NODE] + 1] = 1.0
+
+    try:
+        x = np.linalg.solve(A_eq, b_eq)
+    except np.linalg.LinAlgError:
+        raise ValueError("Sistema singular: geometria instável.")
+
+    return x[:n_bars], lengths
+
+
+def ptv_displacement_unit(axial_unit: np.ndarray, lengths: np.ndarray, areas: np.ndarray) -> float:
+    """
+    Deslocamento vertical em C sob carga unitária, pelo PTV:
+    Δ_C = Σ (n_i · n_i · L_i) / (E · A_i).
+    Para carga P, o deslocamento real é P · Δ_C (sistema linear).
+    """
+    return float(np.sum(axial_unit ** 2 * lengths / (E * areas)))
+
+
+# =========================
+# Capacidade, massa e restrições
+# =========================
+
+def stick_count(sections: np.ndarray) -> int:
+    """Total de palitos Σni conforme R5 do enunciado."""
+    return int(np.sum(sections))
+
+
+def mass_g(lengths_m: np.ndarray, sections: np.ndarray) -> float:
+    volume = sum(section_area(int(n)) * float(L) for L, n in zip(lengths_m, sections))
+    return RHO * volume * 1000.0
+
+
+def bar_capacity(unit_axial_n: float, n_sticks: int) -> float:
+    """Capacidade da barra (N): tração → σt·A; compressão → σc·A  (R7/R8, Sg=2)."""
+    area = section_area(n_sticks)
+    if unit_axial_n > 0.0:
+        return SIGMA_T_ALLOW * area
+    return SIGMA_C_ALLOW * area
+
+
+def evaluate(ind: Individual) -> Individual:
+    """Avalia restrições R1–R8 e calcula o fitness (carga de ruptura / massa)."""
+    # R1, R2, R3 garantidas pelo reparo/clipagem do cromossomo.
+    ind.p_cm = repair_panels(ind.p_cm)
+    ind.h_cm = np.clip(ind.h_cm, HEIGHT_MIN_CM, HEIGHT_MAX_CM)
+    ind.n = np.clip(np.rint(ind.n), 1, 3).astype(int)
+
+    areas = np.array([section_area(int(x)) for x in ind.n])
+
+    try:
+        axial_unit, lengths_m = solve_axial_forces(node_coords(ind.p_cm, ind.h_cm))
+    except ValueError as error:
+        ind.fitness, ind.feasible = 0.0, False
+        ind.data = {"penalty_reasons": [str(error)]}
+        return ind
+
+    lengths_cm = lengths_m * 100.0
+    reasons = []
+
+    # R4: diagonais devem caber em um palito inteiro (sem emenda).
+    if np.any(lengths_cm[DIAGONAL_INDICES] > STICK_LENGTH_CM + 1e-9):
+        reasons.append("R4: diagonal maior que 11,4 cm")
+
+    total_sticks = stick_count(ind.n)
+    if total_sticks > MAX_STICKS:
+        reasons.append("R5: mais de 150 palitos")
+
+    total_mass = mass_g(lengths_m, ind.n)
+    if total_mass >= MAX_MASS_G:
+        reasons.append("R6: massa >= 600 g")
+
+    # Carga de ruptura teórica = min_i (capacidade_i / |força unitária_i|).
+    rupture = np.full(len(CONNECTIVITY), np.inf)
+    for i, coeff in enumerate(axial_unit):
+        if abs(coeff) < 1e-12:
+            continue
+        cap = bar_capacity(float(coeff), int(ind.n[i]))
+        rupture[i] = cap / abs(coeff)
+
+    load_n = float(np.min(rupture))
+    load_kg = load_n / G
+
+    feasible = not reasons
+    ind.fitness = (load_kg / total_mass) if feasible and total_mass > 0 else 0.0
+    ind.feasible = feasible
+
+    stresses_mpa = (axial_unit * load_n / areas) / 1e6
+    delta_unit = ptv_displacement_unit(axial_unit, lengths_m, areas)
+    critical = int(np.argmin(rupture))
+    ind.data = {
+        "penalty_reasons": reasons,
+        "axial_unit_n": axial_unit,
+        "lengths_cm": lengths_cm,
+        "mass_g": total_mass,
+        "stick_count": total_sticks,
+        "theoretical_load_n": load_n,
+        "theoretical_load_kg": load_kg,
+        "critical_bar": BAR_NAMES[critical],
+        "stresses_at_rupture_mpa": stresses_mpa,
+        "delta_c_at_rupture_mm": delta_unit * load_n * 1000.0,
+    }
+    return ind
+
+
+# =========================
+# Algoritmo Genético
+# =========================
+
+def _pareto_front(pts: list[tuple[float, float]]) -> list[list[float]]:
+    """
+    Dado [(mass_g, load_kg), ...] de indivíduos viáveis, retorna o subconjunto
+    não-dominado — minimizar massa, maximizar carga — como [[m, l], ...].
+    """
+    result = []
+    for i, (mi, li) in enumerate(pts):
+        dominated = any(
+            j != i and mj <= mi and lj >= li and (mj < mi or lj > li)
+            for j, (mj, lj) in enumerate(pts)
+        )
+        if not dominated:
+            result.append((mi, li))
+    return [[m, l] for m, l in sorted(result)]
+
+
+def random_individual() -> Individual:
+    p = repair_panels(np.random.uniform(PANEL_MIN_CM, PANEL_MAX_CM, size=4))
+    h = np.random.uniform(HEIGHT_MIN_CM, HEIGHT_MAX_CM, size=5)
+    n = np.random.randint(1, 4, size=17)
+    return evaluate(Individual(p, h, n))
+
+
+def tournament(population: list[Individual], k: int) -> Individual:
+    return max(random.sample(population, k), key=lambda x: x.fitness)
+
+
+def crossover(p1: Individual, p2: Individual, alpha: float = 0.35) -> tuple[Individual, Individual]:
+    """BLX-alpha para genes contínuos (p, h) e cruzamento uniforme para n."""
+    def blx(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        lo, hi = np.minimum(a, b), np.maximum(a, b)
+        diff = hi - lo
+        c1 = np.random.uniform(lo - alpha * diff, hi + alpha * diff)
+        c2 = np.random.uniform(lo - alpha * diff, hi + alpha * diff)
+        return c1, c2
+
+    pa, pb = blx(p1.p_cm, p2.p_cm)
+    ha, hb = blx(p1.h_cm, p2.h_cm)
+    mask = np.random.rand(17) < 0.5
+    na = np.where(mask, p1.n, p2.n)
+    nb = np.where(mask, p2.n, p1.n)
+
+    c1 = Individual(repair_panels(pa), np.clip(ha, HEIGHT_MIN_CM, HEIGHT_MAX_CM), na.astype(int))
+    c2 = Individual(repair_panels(pb), np.clip(hb, HEIGHT_MIN_CM, HEIGHT_MAX_CM), nb.astype(int))
+    return c1, c2
+
+
+def mutate(ind: Individual, p_mut_cont: float = 0.20, p_mut_disc: float = 0.08) -> Individual:
+    p, h, n = ind.p_cm.copy(), ind.h_cm.copy(), ind.n.copy()
+
+    for i in range(4):
+        if random.random() < p_mut_cont:
+            p[i] += random.gauss(0.0, 0.80)
+    for i in range(5):
+        if random.random() < p_mut_cont:
+            h[i] += random.gauss(0.0, 0.60)
+    for i in range(17):
+        if random.random() < p_mut_disc:
+            choices = [1, 2, 3]
+            choices.remove(int(n[i]))
+            n[i] = random.choice(choices)
+
+    ind.p_cm = repair_panels(p)
+    ind.h_cm = np.clip(h, HEIGHT_MIN_CM, HEIGHT_MAX_CM)
+    ind.n = n.astype(int)
+    return ind
+
+
+def run_ga(
+    population_size: int = 250,
+    generations: int = 400,
+    crossover_rate: float = 0.90,
+    elitism: int = 8,
+    tournament_k: int = 4,
+    seed: int | None = 42,
+) -> tuple[Individual, dict]:
+    """Retorna (melhor_indivíduo, histórico) onde histórico contém listas por geração."""
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    population = [random_individual() for _ in range(population_size)]
+    best = max(population, key=lambda x: x.fitness)
+
+    history_best:     list[Individual]        = []
+    history_cloud:    list[list[list[float]]] = []
+    history_pareto:   list[list[list[float]]] = []
+    history_best_obj: list[list[float]]       = []
+
+    for gen in range(1, generations + 1):
+        population.sort(key=lambda x: x.fitness, reverse=True)
+        new_population = population[:elitism]
+
+        while len(new_population) < population_size:
+            p1 = tournament(population, tournament_k)
+            p2 = tournament(population, tournament_k)
+            if random.random() < crossover_rate:
+                c1, c2 = crossover(p1, p2)
+            else:
+                c1 = Individual(p1.p_cm.copy(), p1.h_cm.copy(), p1.n.copy())
+                c2 = Individual(p2.p_cm.copy(), p2.h_cm.copy(), p2.n.copy())
+            new_population.append(evaluate(mutate(c1)))
+            new_population.append(evaluate(mutate(c2)))
+
+        population = new_population[:population_size]
+        gen_best = max(population, key=lambda x: x.fitness)
+        if gen_best.fitness > best.fitness:
+            best = gen_best
+
+        # ── Coleta de dados para visualização ─────────────────────────────
+        cloud: list[list[float]] = []
+        feas_pts: list[tuple[float, float]] = []
+        for ind in population:
+            if ind.data:
+                m = float(ind.data.get("mass_g", 0.0))
+                l = float(ind.data.get("theoretical_load_kg", 0.0))
+                f = 1.0 if ind.feasible else 0.0
+                cloud.append([m, l, f])
+                if ind.feasible:
+                    feas_pts.append((m, l))
+
+        history_best.append(best)
+        history_cloud.append(cloud)
+        history_pareto.append(_pareto_front(feas_pts))
+        history_best_obj.append([
+            float(best.data.get("mass_g", 0.0)),
+            float(best.data.get("theoretical_load_kg", 0.0)),
+        ])
+
+        if gen == 1 or gen % 25 == 0:
+            viaveis = sum(1 for x in population if x.feasible)
+            print(
+                f"Geração {gen:4d} | fitness = {best.fitness:.6f} "
+                f"| carga = {best.data['theoretical_load_kg']:.3f} kg "
+                f"| massa = {best.data['mass_g']:.2f} g "
+                f"| viáveis = {viaveis}/{population_size}"
+            )
+
+    historico = {
+        "best":     history_best,
+        "cloud":    history_cloud,
+        "pareto":   history_pareto,
+        "best_obj": history_best_obj,
+    }
+    return best, historico
+
+
+# =========================
+# Relatório
+# =========================
+
+def print_report(best: Individual) -> None:
+    d = best.data
+    print("\n" + "=" * 70)
+    print("MELHOR TRELIÇA ENCONTRADA")
+    print("=" * 70)
+
+    print(f"\nPainéis p1..p4 (cm): {np.round(best.p_cm, 3)}  soma = {np.sum(best.p_cm):.1f} cm")
+    print(f"Alturas h1..h5 (cm): {np.round(best.h_cm, 3)}")
+
+    print("\nSeções e comprimentos por barra:")
+    print(f"{'Barra':>5s} | {'Palitos':>7s} | {'L (cm)':>7s}")
+    print("-" * 27)
+    for bar, n, L in zip(BAR_NAMES, best.n, d["lengths_cm"]):
+        print(f"{bar:>5s} | {int(n):>7d} | {L:7.3f}")
+
+    print("\nResultados principais:")
+    print(f"  Fitness teórico:        {best.fitness:.6f} kg/g")
+    print(f"  Carga de ruptura:       {d['theoretical_load_kg']:.4f} kg")
+    print(f"  Massa total:            {d['mass_g']:.4f} g")
+    print(f"  Palitos estimados:      {d['stick_count']}")
+    print(f"  Barra crítica:          {d['critical_bar']}")
+    print(f"  Δ_C na ruptura:         {d['delta_c_at_rupture_mm']:.4f} mm")
+    print(f"  Viável:                 {best.feasible}")
+    if not best.feasible:
+        for reason in d["penalty_reasons"]:
+            print("   -", reason)
+
+    print("\nForças e tensões na carga de ruptura:")
+    axial = d["axial_unit_n"] * d["theoretical_load_n"]
+    print(f"{'Barra':>5s} | {'N (N)':>10s} | {'σ (MPa)':>9s} | {'Estado':>11s}")
+    print("-" * 46)
+    for bar, ax, st in zip(BAR_NAMES, axial, d["stresses_at_rupture_mpa"]):
+        estado = "tração" if ax > 1e-9 else "compressão" if ax < -1e-9 else "zero"
+        print(f"{bar:>5s} | {ax:10.3f} | {st:9.3f} | {estado:>11s}")
+
+
+_BAR_TYPE = {
+    "A-B": "Banzo inferior",  "B-C": "Banzo inferior",
+    "C-D": "Banzo inferior",  "D-E": "Banzo inferior",
+    "F-G": "Banzo superior",  "G-H": "Banzo superior",
+    "H-I": "Banzo superior",  "I-J": "Banzo superior",
+    "A-F": "Vertical ext.",   "G-B": "Vertical int.",
+    "H-C": "Vertical central","I-D": "Vertical int.",
+    "E-J": "Vertical ext.",
+    "F-B": "Diagonal",        "G-C": "Diagonal",
+    "I-C": "Diagonal",        "J-D": "Diagonal",
+}
+
+_SIGMA_T_ADM_MPA = 27.5
+_SIGMA_C_ADM_MPA = 17.5
+_STICK_LEN_CM    = 11.4
+_B_CM, _T_CM     = 1.0, 0.2
+
+
+def print_report_builder(best: Individual) -> None:
+    """Relatório completo para os construtores da treliça."""
+    import math as _math
+
+    d          = best.data
+    p          = best.p_cm
+    h          = best.h_cm
+    n_arr      = best.n
+    lengths_cm = d["lengths_cm"]
+    axial_unit = d["axial_unit_n"]
+    load_n     = d["theoretical_load_n"]
+    load_kg    = d["theoretical_load_kg"]
+    m_g        = d["mass_g"]
+    stresses   = d["stresses_at_rupture_mpa"]
+    delta_mm   = d["delta_c_at_rupture_mm"]
+    crit       = d["critical_bar"]
+
+    axial_real = axial_unit * load_n
+
+    W   = 76
+    SEP = "═" * W
+    sep = "─" * W
+
+    # ── Nós ──────────────────────────────────────────────────────────────────
+    x_nós = [0.0, p[0], p[0]+p[1], p[0]+p[1]+p[2], 40.0]
+    nós = {
+        "A": (x_nós[0], 0.0), "B": (x_nós[1], 0.0),
+        "C": (x_nós[2], 0.0), "D": (x_nós[3], 0.0), "E": (x_nós[4], 0.0),
+        "F": (x_nós[0], h[0]), "G": (x_nós[1], h[1]),
+        "H": (x_nós[2], h[2]), "I": (x_nós[3], h[3]), "J": (x_nós[4], h[4]),
+    }
+
+    # ── Inventário físico ─────────────────────────────────────────────────────
+    inv = []
+    total_phys = 0
+    for bar, ni, L in zip(BAR_NAMES, n_arr, lengths_cm):
+        segs = _math.ceil(L / _STICK_LEN_CM)
+        phys = int(ni) * segs
+        total_phys += phys
+        inv.append({"bar": bar, "tipo": _BAR_TYPE.get(bar, ""),
+                    "L": L, "n": int(ni), "segs": segs, "phys": phys,
+                    "area_cm2": _B_CM * int(ni) * _T_CM})
+
+    print(f"\n{SEP}")
+    print("  RELATÓRIO DE CONSTRUÇÃO — TRELIÇA HOWE DE PALITOS".center(W))
+    print("  Atividade 9  |  EST/UEA  |  Algoritmos de Otimização".center(W))
+    print(SEP)
+
+    # ── 0. Material ───────────────────────────────────────────────────────────
+    print(f"\n  MATERIAL")
+    print(f"  {'Madeira':25s}: Bétula (palito de picolé)")
+    print(f"  {'E':25s}: 3 500 MPa")
+    print(f"  {'ρ':25s}: 510 kg/m³")
+    print(f"  {'σt admissível (Sg=2)':25s}: {_SIGMA_T_ADM_MPA} MPa")
+    print(f"  {'σc admissível (Sg=2)':25s}: {_SIGMA_C_ADM_MPA} MPa")
+    print(f"  {'Dimensões do palito':25s}: {_STICK_LEN_CM} cm × {_B_CM} cm × {_T_CM} cm")
+
+    # ── 1. Geometria ──────────────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("  1. GEOMETRIA")
+    print(sep)
+    print(f"\n  Painéis (p1…p4) : {' | '.join(f'{v:.3f} cm' for v in p)}"
+          f"   →  Σ = {sum(p):.1f} cm")
+    print(f"  Alturas (h1…h5) : {' | '.join(f'{v:.3f} cm' for v in h)}")
+
+    print(f"\n  {'Nó':>3}  {'x (cm)':>8}  {'y (cm)':>8}  Nível")
+    print(f"  {'---':>3}  {'--------':>8}  {'--------':>8}  --------")
+    for nm, (xn, yn) in nós.items():
+        nivel = "Banzo inferior" if yn == 0.0 else "Banzo superior"
+        print(f"  {nm:>3}  {xn:8.3f}  {yn:8.3f}  {nivel}")
+
+    # ── 2. Inventário de barras ───────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("  2. INVENTÁRIO DE BARRAS")
+    print(sep)
+    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'L (cm)':>7}  {'n':>2}  {'A (cm²)':>7}  {'Palitos':>7}")
+    print(f"  {'─'*5}  {'─'*18}  {'─'*7}  {'─'*2}  {'─'*7}  {'─'*7}")
+    for row in inv:
+        print(f"  {row['bar']:>5}  {row['tipo']:18}  {row['L']:7.3f}  "
+              f"{row['n']:>2}  {row['area_cm2']:7.4f}  {row['phys']:>7}")
+
+    print(f"\n  Total de palitos físicos: {total_phys}")
+    print(f"  Recomenda-se comprar {int(total_phys * 1.15) + 1} (+15 % de folga para erros de corte).")
+
+    emendas = [r for r in inv if r["segs"] > 1]
+    if emendas:
+        print(f"\n  Barras com emenda (L > {_STICK_LEN_CM} cm):")
+        for r in emendas:
+            print(f"    {r['bar']:>5}  {r['L']:.3f} cm  →  "
+                  f"{r['segs']} palitos em série × {r['n']} camada(s) = {r['phys']} palitos")
+
+    # ── 3. Esforços e verificação ─────────────────────────────────────────────
+    print(f"\n{sep}")
+    print(f"  3. ESFORÇOS NA CARGA DE RUPTURA  (P = {load_kg:.4f} kg  /  {load_n:.2f} N)")
+    print(sep)
+    print(f"\n  {'Barra':>5}  {'Tipo':18}  {'N (N)':>9}  "
+          f"{'σ (MPa)':>8}  {'σadm':>6}  {'FS':>5}  Estado")
+    print(f"  {'─'*5}  {'─'*18}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*5}  ──────────")
+    for bar, ni, L, nr, st in zip(BAR_NAMES, n_arr, lengths_cm, axial_real, stresses):
+        if abs(nr) < 1e-9:
+            estado = "zero      "; σadm = _SIGMA_T_ADM_MPA; fs_s = "  —  "
+        elif nr > 0:
+            estado = "tração    "; σadm = _SIGMA_T_ADM_MPA
+            fs_s = f"{σadm / abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
+        else:
+            estado = "compressão"; σadm = _SIGMA_C_ADM_MPA
+            fs_s = f"{σadm / abs(st):.2f}" if abs(st) > 1e-9 else "  ∞  "
+        ok = "OK" if abs(st) <= σadm + 1e-6 else "VIOLA"
+        print(f"  {bar:>5}  {_BAR_TYPE.get(bar,''):18}  {nr:+9.2f}  "
+              f"{st:+8.3f}  {σadm:>6.1f}  {fs_s:>5}  {estado} [{ok}]")
+
+    # ── 4. Resultados globais ─────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("  4. RESULTADOS GLOBAIS")
+    print(sep)
+    sticks_gene = int(sum(n_arr))
+    print(f"\n  {'Massa total':35s}: {m_g:.4f} g")
+    print(f"  {'Carga de ruptura teórica':35s}: {load_kg:.4f} kg")
+    print(f"  {'Fitness (carga/massa)':35s}: {best.fitness:.6f} kg/g")
+    print(f"  {'Deslocamento Δ_C na ruptura':35s}: {delta_mm:.4f} mm")
+    print(f"  {'Barra crítica':35s}: {crit}  ({_BAR_TYPE.get(crit,'')})")
+    print(f"  {'Σni (R5 ≤ 150)':35s}: {sticks_gene}  "
+          f"{'[OK]' if sticks_gene <= 150 else '[VIOLA]'}")
+    print(f"  {'Palitos físicos estimados':35s}: {total_phys}")
+    print(f"  {'Solução viável':35s}: {'Sim ✓' if best.feasible else 'Não ✗'}")
+    if not best.feasible:
+        for r in d.get("penalty_reasons", []):
+            print(f"    ✗ {r}")
+
+    # ── 5. Lista de cortes ────────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("  5. GUIA DE CORTE")
+    print(sep)
+    inteiros  = [r for r in inv if abs(r["L"] - _STICK_LEN_CM) < 0.05]
+    a_cortar  = [r for r in inv if r["L"] < _STICK_LEN_CM - 0.05]
+    if inteiros:
+        print(f"\n  Barras que usam palito INTEIRO ({_STICK_LEN_CM} cm):")
+        for r in inteiros:
+            print(f"    {r['bar']:>5}  ({r['tipo']})  —  {r['n']} camada(s)")
+    if a_cortar:
+        print(f"\n  Barras que exigem CORTE:")
+        print(f"    {'Barra':>5}  {'Comprimento':>12}  {'Corte por palito':>16}  Camadas")
+        for r in a_cortar:
+            sobra = _STICK_LEN_CM - r["L"]
+            print(f"    {r['bar']:>5}  {r['L']:>10.3f} cm  "
+                  f"retirar {sobra:.3f} cm  {r['n']:>7} camada(s)")
+
+    # ── 6. Montagem ───────────────────────────────────────────────────────────
+    print(f"\n{sep}")
+    print("  6. SEQUÊNCIA DE MONTAGEM RECOMENDADA")
+    print(sep)
+    print(f"""
+  MATERIAIS:
+    • {int(total_phys * 1.15) + 1} palitos de picolé (Bétula, {_STICK_LEN_CM} × {_B_CM} × {_T_CM} cm)
+    • Cola de madeira (PVA branco ou cianoacrilato)
+    • Régua de aço, esquadro 90°, estilete
+    • Base plana (isopor ou MDF) com papel milimetrado como gabarito
+    • Prendedores / clips enquanto a cola seca
+
+  PASSO A PASSO:
+    1. Imprima ou trace o diagrama com as coordenadas acima em papel milimetrado
+       colado sobre uma base plana — isso serve de gabarito.
+    2. Corte todos os palitos nas dimensões do Guia de Corte antes de montar.
+       Lixe as extremidades para encaixes precisos.
+    3. Monte o BANZO INFERIOR alinhando-o pela base do gabarito:
+         A─B ({p[0]:.2f} cm)  →  B─C ({p[1]:.2f} cm)  →  C─D ({p[2]:.2f} cm)  →  D─E ({p[3]:.2f} cm)
+    4. Instale as VERTICAIS EXTERNAS (A─F e E─J), perpendiculares ao banzo.
+       Fixe com cola; aguarde ≥ 5 min antes de continuar.
+    5. Instale as VERTICAIS INTERNAS (G─B, H─C, I─D).
+       G─B e I─D em tração — atenção ao alinhamento vertical.
+    6. Instale o BANZO SUPERIOR (F─G, G─H, H─I, I─J).
+       Use o gabarito para conferir as alturas dos nós F, G, H, I, J.
+    7. Instale as DIAGONAIS por último (F─B, G─C, I─C, J─D).
+       Cada diagonal cabe em 1 palito inteiro — confirme antes de colar.
+    8. Para barras com n > 1: cole as camadas face a face sob pressão uniforme;
+       aguarde cura completa (≥ 30 min) antes de carregar.
+
+  PONTOS CRÍTICOS:
+    • Nó C (x = {x_nós[2]:.2f} cm) = ponto de carga — reforce as junções das 5 barras.
+    • Barra crítica: {crit} ({_BAR_TYPE.get(crit,'')}) — inspecione cuidadosamente.
+    • Vão livre entre apoios: exactamente 40,0 cm.
+    • Apoio A = pino fixo (x e y); Apoio E = rolete (só y).
+    • Pese a treliça pronta antes do ensaio; valor previsto: {m_g:.2f} g.
+    • Diferença > 30 % entre carga real e teórica deve ser justificada.
+
+  PREVISÃO DO ENSAIO:
+    Carga de ruptura: {load_kg:.2f} kg    |    Eficiência: {best.fitness:.4f} kg/g
+""")
+    print(SEP)
+
+
+if __name__ == "__main__":
+    melhor, historico = run_ga()
+    print_report(melhor)
+    print_report_builder(melhor)
+
+    try:
+        from visualizer_howe import animate_evolution, save_final_image
+        cloud_total = [pt for gen in historico["cloud"] for pt in gen]
+        animate_evolution(
+            historico["best"],
+            historico["cloud"],
+            historico["pareto"],
+            historico["best_obj"],
+            total_gens=400,
+            gif_path="best_truss.gif",
+        )
+        save_final_image(
+            melhor,
+            cloud_total,
+            historico["pareto"][-1],
+            historico["best_obj"][-1],
+            total_gens=400,
+            png_path="best_truss_final.png",
+        )
+    except Exception as exc:
+        print(f"\n[Visualizador] {exc}")
