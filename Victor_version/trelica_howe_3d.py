@@ -6,7 +6,7 @@ Cromossomo (27 genes):
   Bloco 1 — contínuo (10 genes):
     p1..p4  ∈ [3, 11.4] cm  largura de cada painel  (Σ = 40 cm)
     h1..h5  ∈ [3, 11.4] cm  altura de cada vertical
-    w       ∈ [2,  6.0] cm  largura entre os dois pórticos
+    w       ∈ [3, 11.4] cm  largura entre os dois pórticos
 
   Bloco 2 — discreto (17 genes):
     n1..n17 ∈ {1, 2, 3}     palitos colados por barra (seção de cada pórtico)
@@ -39,10 +39,16 @@ G  = 9.80665
 SPAN_CM                  = 40.0
 PANEL_MIN_CM, PANEL_MAX_CM = 3.0, 11.4
 HEIGHT_MIN_CM, HEIGHT_MAX_CM = 3.0, 11.4
-WIDTH_MIN_CM,  WIDTH_MAX_CM  = 2.0, 6.0   # largura entre pórticos
+WIDTH_MIN_CM,  WIDTH_MAX_CM  = 3.0, 11.4  # largura entre pórticos
 STICK_LENGTH_CM          = 11.4
 MAX_STICKS               = 150
 MAX_MASS_G               = 600.0
+
+# Coeficientes de penalidade aditiva — mesmo padrão da Atividade 8
+P_R4 = 10.0    # (kg/g) por cm de diagonal além de 11,4 cm
+P_R5 = 0.010   # (kg/g) por palito além de 150
+P_R6 = 0.005   # (kg/g) por grama além de 600 g
+
 N_BRACE                  = 1               # palitos por travamento (fixo)
 N_BRACE_BARS             = 10             # nós: A–A' … J–J'
 
@@ -91,6 +97,7 @@ class Individual:
     w_cm: float           # largura entre pórticos
     n:    np.ndarray      # (17,) ∈ {1,2,3}
     fitness:  float = 0.0
+    objectives: tuple = field(default_factory=lambda: (1e12, 1e12))  # (massa+pen, -carga+pen)
     feasible: bool  = False
     data: dict = field(default_factory=dict)
 
@@ -181,6 +188,14 @@ def stick_count_3d(sections: np.ndarray) -> int:
     return 2 * int(np.sum(sections)) + N_BRACE_BARS * N_BRACE
 
 
+def calcular_penalidades(lengths_cm: np.ndarray, total_sticks: int, total_mass: float) -> float:
+    """Penalidade aditiva proporcional à violação — mesmo padrão da Atividade 8."""
+    viol_r4 = float(np.sum(np.maximum(0.0, lengths_cm[DIAGONAL_INDICES] - STICK_LENGTH_CM)))
+    viol_r5 = max(0, total_sticks - MAX_STICKS)
+    viol_r6 = max(0.0, total_mass - MAX_MASS_G)
+    return P_R4 * viol_r4 + P_R5 * viol_r5 + P_R6 * viol_r6
+
+
 def bar_capacity(unit_axial_n: float, n_sticks: int, length_m: float) -> float:
     """Tração → σt·A; Compressão → min(σc·A, Euler), palitos em paralelo (∝ n)."""
     area = section_area(n_sticks)
@@ -234,8 +249,10 @@ def evaluate(ind: Individual) -> Individual:
     load_n_3d    = 2.0 * load_n_frame       # carga total da estrutura 3D
     load_kg_3d   = load_n_3d / G
 
-    feasible = not reasons
-    ind.fitness  = (load_kg_3d / total_mass) if feasible and total_mass > 0 else 0.0
+    penalidade = calcular_penalidades(lengths_cm, total_sticks, total_mass)
+    feasible = (penalidade == 0.0)
+    ind.fitness = (load_kg_3d / total_mass) if feasible and total_mass > 0 else 0.0
+    ind.objectives = (total_mass + penalidade, -load_kg_3d + penalidade)
     ind.feasible = feasible
 
     stresses_mpa = (axial_unit * load_n_frame / areas) / 1e6
@@ -269,16 +286,83 @@ def _pareto_front(pts):
     return [[m, l] for m, l in sorted(result)]
 
 
+def _dominates(obj_a: tuple, obj_b: tuple) -> bool:
+    """obj_a domina obj_b se for ≤ em todos e < em pelo menos um (ambos minimizados)."""
+    return (obj_a[0] <= obj_b[0] and obj_a[1] <= obj_b[1] and
+            (obj_a[0] < obj_b[0] or obj_a[1] < obj_b[1]))
+
+
+def _non_dominated_sort(population: list[Individual]) -> tuple[list, list]:
+    n = len(population)
+    dominated_by = [[] for _ in range(n)]
+    domination_count = [0] * n
+    fronts: list[list[int]] = [[]]
+    rank = [0] * n
+
+    for p in range(n):
+        for q in range(n):
+            if p == q:
+                continue
+            if _dominates(population[p].objectives, population[q].objectives):
+                dominated_by[p].append(q)
+            elif _dominates(population[q].objectives, population[p].objectives):
+                domination_count[p] += 1
+        if domination_count[p] == 0:
+            fronts[0].append(p)
+
+    i = 0
+    while fronts[i]:
+        next_front: list[int] = []
+        for p in fronts[i]:
+            for q in dominated_by[p]:
+                domination_count[q] -= 1
+                if domination_count[q] == 0:
+                    rank[q] = i + 1
+                    next_front.append(q)
+        i += 1
+        fronts.append(next_front)
+    fronts.pop()
+    return fronts, rank
+
+
+def _crowding_distance(front: list[int], population: list[Individual]) -> dict:
+    dist: dict[int, float] = {idx: 0.0 for idx in front}
+    size = len(front)
+    if size <= 2:
+        for idx in front:
+            dist[idx] = float('inf')
+        return dist
+    for m in range(2):
+        ordered = sorted(front, key=lambda idx: population[idx].objectives[m])
+        dist[ordered[0]] = dist[ordered[-1]] = float('inf')
+        f_min = population[ordered[0]].objectives[m]
+        f_max = population[ordered[-1]].objectives[m]
+        span = f_max - f_min
+        if span == 0:
+            continue
+        for k in range(1, size - 1):
+            dist[ordered[k]] += (
+                population[ordered[k + 1]].objectives[m] -
+                population[ordered[k - 1]].objectives[m]
+            ) / span
+    return dist
+
+
+def nsga_tournament(population: list[Individual], rank: list, crowding: dict) -> Individual:
+    a, b = random.sample(range(len(population)), 2)
+    if rank[a] < rank[b]:
+        return population[a]
+    elif rank[b] < rank[a]:
+        return population[b]
+    return population[a] if crowding.get(a, 0.0) >= crowding.get(b, 0.0) else population[b]
+
+
 def random_individual() -> Individual:
     p = repair_panels(np.random.uniform(PANEL_MIN_CM, PANEL_MAX_CM, 4))
     h = np.random.uniform(HEIGHT_MIN_CM, HEIGHT_MAX_CM, 5)
     w = random.uniform(WIDTH_MIN_CM, WIDTH_MAX_CM)
     n = np.random.randint(1, 4, 17)
     return evaluate(Individual(p, h, w, n))
-
-
-def tournament(population, k):
-    return max(random.sample(population, k), key=lambda x: x.fitness)
 
 
 def crossover(p1: Individual, p2: Individual,
@@ -343,38 +427,58 @@ def run_ga(
     population_size: int = 250,
     generations:     int = 400,
     crossover_rate:  float = 0.90,
-    elitism:         int = 8,
-    tournament_k:    int = 4,
     seed:            int | None = 42,
 ) -> tuple[Individual, dict]:
     if seed is not None:
         random.seed(seed); np.random.seed(seed)
 
     population = [random_individual() for _ in range(population_size)]
-    best       = max(population, key=lambda x: x.fitness)
+    feas = [x for x in population if x.feasible]
+    best = max(feas if feas else population, key=lambda x: x.fitness)
 
     h_best, h_cloud, h_pareto, h_best_obj = [], [], [], []
 
     for gen in range(1, generations + 1):
-        population.sort(key=lambda x: x.fitness, reverse=True)
-        new_pop = population[:elitism]
+        fronts, rank = _non_dominated_sort(population)
+        crowding: dict[int, float] = {}
+        for front in fronts:
+            crowding.update(_crowding_distance(front, population))
 
-        while len(new_pop) < population_size:
-            p1, p2 = tournament(population, tournament_k), tournament(population, tournament_k)
+        offspring: list[Individual] = []
+        while len(offspring) < population_size:
+            p1 = nsga_tournament(population, rank, crowding)
+            p2 = nsga_tournament(population, rank, crowding)
             c1, c2 = crossover(p1, p2) if random.random() < crossover_rate else (
                 Individual(p1.p_cm.copy(), p1.h_cm.copy(), p1.w_cm, p1.n.copy()),
                 Individual(p2.p_cm.copy(), p2.h_cm.copy(), p2.w_cm, p2.n.copy()),
             )
-            new_pop.append(evaluate(mutate(c1)))
-            new_pop.append(evaluate(mutate(c2)))
+            offspring.append(evaluate(mutate(c1)))
+            offspring.append(evaluate(mutate(c2)))
 
-        population = new_pop[:population_size]
-        gen_best   = max(population, key=lambda x: x.fitness)
+        combined = population + offspring
+        fronts_c, _ = _non_dominated_sort(combined)
+        crowding_c: dict[int, float] = {}
+        for front in fronts_c:
+            crowding_c.update(_crowding_distance(front, combined))
+
+        next_pop: list[Individual] = []
+        for front in fronts_c:
+            if len(next_pop) + len(front) <= population_size:
+                next_pop.extend(combined[idx] for idx in front)
+            else:
+                remaining = population_size - len(next_pop)
+                ordered = sorted(front, key=lambda idx: crowding_c.get(idx, 0.0), reverse=True)
+                next_pop.extend(combined[idx] for idx in ordered[:remaining])
+                break
+        population = next_pop
+
+        feas = [x for x in population if x.feasible]
+        gen_best = max(feas if feas else population, key=lambda x: x.fitness)
         if gen_best.fitness > best.fitness:
             best = gen_best
 
-        cloud     = []
-        feas_pts  = []
+        cloud    = []
+        feas_pts = []
         for ind in population:
             if ind.data:
                 m = float(ind.data.get("mass_g", 0.0))
