@@ -8,14 +8,14 @@
 
 O problema é classificado como **MINLP** (Mixed-Integer Non-Linear Programming): variáveis contínuas para a geometria e discretas para as seções transversais.
 
-**Formulação bi-objetivo** (NSGA-II):
+**Formulação mono-objetivo** (fitness acoplado):
 
 ```
-Minimizar  f1(x) = massa_total [g]  +  penalidade(x)
-Minimizar  f2(x) = −carga_ruptura [kg]  +  penalidade(x)
+Maximizar  f(x) = carga_ruptura [kg] / massa_total [g]     (indivíduo viável)
+Maximizar  f(x) = −penalidade(x)                           (indivíduo inviável)
 ```
 
-Minimizar `f2` equivale a maximizar a carga de ruptura. A formulação bi-objetivo expõe a fronteira Pareto entre leveza e resistência, permitindo ao projetista escolher o ponto de compromisso adequado.
+A razão carga/massa recompensa simultaneamente estruturas leves e resistentes. A fronteira Pareto entre leveza e resistência é rastreada ao longo da evolução **apenas para visualização** — ela não influencia a seleção.
 
 ---
 
@@ -151,7 +151,7 @@ A penalidade é adicionada a ambos os objetivos. Indivíduos viáveis têm penal
 
 ---
 
-## 7. Algoritmo Genético — NSGA-II
+## 7. Algoritmo Genético
 
 ### Parâmetros
 
@@ -160,12 +160,11 @@ A penalidade é adicionada a ambos os objetivos. Indivíduos viáveis têm penal
 | Tamanho da população | 250 |
 | Gerações | 400 |
 | Taxa de cruzamento | 90% |
+| Elitismo explícito | 8 melhores preservados |
 | Seed padrão | 42 |
 
-### Seleção — Torneio Binário NSGA-II
-Sorteia 2 indivíduos:
-- Ganha o de **menor rank de Pareto**
-- Empate: ganha o de **maior distância de aglomeração** (mais isolado na frente)
+### Seleção — Torneio Binário
+Sorteia 2 indivíduos e seleciona o de **maior fitness escalar** (`carga_kg/massa_g` ou `−penalidade`).
 
 ### Cruzamento — BLX-α (α = 0.35) para genes contínuos
 ```
@@ -181,16 +180,15 @@ Para genes discretos: **cruzamento uniforme** (máscara binária 50/50).
 | Tipo | Operação | Probabilidade |
 |---|---|---|
 | Contínua (p, h) | Gaussiana σ = 0.80 cm (p) / 0.60 cm (h) | 20% por gene |
-| Contínua (w) | Gaussiana σ = 0.40 cm | 20% |
+| Contínua (w) | Gaussiana σ = 0.40 cm (só versão 3D) | 20% |
 | Discreta (n) | Substituição aleatória em {1, 2, 3} | 8% por gene |
 
-### Seleção da Próxima Geração (elitismo implícito)
-1. Combina pais (250) + filhos (250) → 500 indivíduos
-2. Classifica todos em frentes de Pareto (`_non_dominated_sort`)
-3. Preenche a próxima geração com a frente 1 inteira, depois a frente 2, etc.
-4. Se uma frente não cabe inteira: ordena por distância de aglomeração e pega os mais isolados
+### Seleção da Próxima Geração (elitismo explícito)
+1. Os 8 melhores da geração atual são copiados diretamente para a próxima (**elite**)
+2. Os demais são gerados por torneio + cruzamento + mutação até completar 250 indivíduos
+3. A população é ordenada por fitness e mantidos os 250 melhores
 
-O elitismo é **implícito**: a frente 1 da geração atual sempre sobrevive para a próxima.
+O elitismo é **explícito**: os 8 melhores nunca são descartados.
 
 ---
 
