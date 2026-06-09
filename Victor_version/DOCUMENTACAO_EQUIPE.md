@@ -10,7 +10,7 @@
 | **Nome** | Original | 2D Corrigido | 3D Construível |
 | **Genes** | 26 | 26 | 27 (+w) |
 | **Análise estrutural** | Matriz de rigidez (FEM) | Equilíbrio de nós (app/utils) | Equilíbrio de nós (app/utils) |
-| **Euler buckling** | n × I_single ✓ | n × I_single ✓ | n × I_single ✓ |
+| **Euler buckling** | n × I_single ✓ | n × I_single ✓ | n × I_single ✓ |eval "$(zoxide init zsh --cmd cd)"
 | **Contagem palitos (R5)** | Σ nᵢ × ⌈L/11.4⌉ ✗ | Σ nᵢ ✓ | 2·Σ nᵢ + 10 ✓ |
 | **Penalidade** | Multiplicativa ✗ | Aditiva (Atv.8) ✓ | Aditiva (Atv.8) ✓ |
 | **Seleção** | Torneio k=4 + elitismo 8 ✗ | NSGA-II bi-objetivo ✓ | NSGA-II bi-objetivo ✓ |
