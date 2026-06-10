@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Treliça Howe 3D — Evolução AG</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#070710; overflow:hidden; font-family:'Courier New',monospace; }
+#info {
+  position:fixed; top:16px; left:16px; color:#fff;
+  z-index:10; pointer-events:none; line-height:1.8;
+}
+#gen  { font-size:21px; font-weight:bold; color:#60a5fa; }
+#mass { font-size:13px; opacity:.9; }
+#load { font-size:13px; color:#86efac; }
+#feas { font-size:12px; margin-top:2px; }
+#legend {
+  position:fixed; bottom:18px; left:16px; color:#ccc;
+  z-index:10; pointer-events:none; font-size:12px;
+}
+.lr { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+.sw { width:26px; height:9px; border-radius:2px; }
+#note {
+  position:fixed; top:16px; right:16px; color:rgba(255,255,255,.30);
+  font-size:11px; text-align:right; z-index:10; pointer-events:none; line-height:1.7;
+}
+#speed {
+  position:fixed; bottom:18px; right:16px;
+  z-index:10; display:flex; align-items:center; gap:8px;
+  font-size:12px; color:rgba(255,255,255,.55);
+}
+#speed span { font-size:11px; }
+#speed-range {
+  -webkit-appearance:none; width:110px; height:3px;
+  background:rgba(255,255,255,.2); border-radius:2px; outline:none; cursor:pointer;
+}
+#speed-range::-webkit-slider-thumb {
+  -webkit-appearance:none; width:14px; height:14px;
+  border-radius:50%; background:#60a5fa; cursor:pointer;
+}
+#bar-wrap {
+  position:fixed; bottom:0; left:0; right:0;
+  height:3px; background:rgba(255,255,255,.08); z-index:10;
+}
+#bar { height:100%; background:#60a5fa; width:0%; }
+</style>
+</head>
+<body>
+
+<div id="info">
+  <div id="gen">Geração — / —</div>
+  <div id="mass">Massa: <span id="mv">—</span> g</div>
+  <div id="load">Carga: <span id="lv">—</span> kg</div>
+  <div id="feas">Viável: <span id="fv">—</span></div>
+</div>
+
+<div id="legend">
+  <div class="lr"><div class="sw" style="background:#3b82f6"></div>1 palito</div>
+  <div class="lr"><div class="sw" style="background:#22c55e"></div>2 palitos</div>
+  <div class="lr"><div class="sw" style="background:#ef4444"></div>3 palitos</div>
+  <div class="lr"><div class="sw" style="background:#7799bb;opacity:.7"></div>Travamento lateral</div>
+  <div class="lr" style="margin-top:4px">
+    <div style="width:10px;height:10px;border-radius:50%;background:#ff4444;flex-shrink:0"></div>
+    Nó C — carga
+  </div>
+</div>
+
+<div id="note">carregando…</div>
+
+<div id="speed">
+  <span>🐢</span>
+  <input id="speed-range" type="range" min="10" max="120" value="40" step="5">
+  <span>🐇</span>
+  <span id="speed-label" style="min-width:42px">40 s</span>
+</div>
+
+<div id="bar-wrap"><div id="bar"></div></div>
+
+<!-- ag_data.js: carregamento local (funciona com file://) -->
+<script>
+(function(){
+  var s=document.createElement('script');
+  s.src='ag_data.js';
+  // sem onerror: se não existir, window.AG_DATA fica undefined → fallback sintético
+  document.head.appendChild(s);
+})();
+</script>
+
+<!-- Three.js: local primeiro, CDN como fallback -->
+<script>
+(function(){
+  var s=document.createElement('script');
+  s.src='three.min.js';
+  s.onerror=function(){
+    var s2=document.createElement('script');
+    s2.src='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+    s2.onerror=function(){ document.getElementById('note').textContent='ERRO: three.js não encontrado. Execute setup_venv.bat.'; };
+    document.head.appendChild(s2);
+  };
+  document.head.appendChild(s);
+})();
+</script>
+
+<script>
+/* ================================================================
+   ESTRUTURA DA TRELIÇA HOWE 3D (Victor_version/trelica_howe_3d.py)
+   20 nós: 0-9 pórtico frontal (z=0), 10-19 traseiro (z=w)
+   44 barras: 17 pórtico1 + 17 pórtico2 + 10 travamentos
+================================================================ */
+const CONN = [
+  [0,1],[1,2],[2,3],[3,4],       // banzo inf
+  [5,6],[6,7],[7,8],[8,9],       // banzo sup
+  [0,5],[6,1],[7,2],[8,3],[4,9], // verticais
+  [5,1],[6,2],[8,2],[9,3],       // diagonais
+];
+const ALL_MBR = [
+  ...CONN,                              // pórtico 1
+  ...CONN.map(([i,j])=>[i+10,j+10]),   // pórtico 2
+  ...Array.from({length:10},(_,i)=>[i,i+10]), // travamentos
+];
+
+/* ================================================================
+   DADOS SINTÉTICOS — fallback se ag_data.json não for encontrado
+================================================================ */
+function lerp(a,b,t){ return a+(b-a)*t; }
+function easeOut(t){ return 1-Math.pow(1-t,3); }
+function prng(seed){ let s=seed; return ()=>{ s=(s*9301+49297)%233280; return s/233280; }; }
+
+function buildSyntheticData(){
+  const N=30, gens=[];
+  for(let g=0;g<N;g++){
+    const rng=prng(42+g*23), t=g/(N-1), e=easeOut(t), nu=(1-e)*.30;
+    const p0=Math.max(3,lerp(8,10,e)+nu*(rng()-.5)*10);
+    const p1=Math.max(3,lerp(14,10,e)+nu*(rng()-.5)*10);
+    const p2=Math.max(3,lerp(12,10,e)+nu*(rng()-.5)*10);
+    const p3=Math.max(3,40-p0-p1-p2);
+    const h=[
+      Math.max(3,lerp(4,6,e)+nu*(rng()-.5)*5),
+      Math.max(3,lerp(6,8,e)+nu*(rng()-.5)*4),
+      Math.max(3,lerp(9,10,e)+nu*(rng()-.5)*3),
+      Math.max(3,lerp(5,8,e)+nu*(rng()-.5)*4),
+      Math.max(3,lerp(3,6,e)+nu*(rng()-.5)*5),
+    ];
+    const w=Math.max(3,lerp(10,7,e)+nu*(rng()-.5)*4);
+    const xs=[0,p0,p0+p1,p0+p1+p2,40];
+    const front=xs.flatMap((x,i)=>i<5?[[x,0,0]]:[[x,h[i-5],0]]);
+    // front: A B C D E (y=0) then F G H I J (y=hi)
+    const nodes=[
+      [xs[0],0,0],[xs[1],0,0],[xs[2],0,0],[xs[3],0,0],[xs[4],0,0],
+      [xs[0],h[0],0],[xs[1],h[1],0],[xs[2],h[2],0],[xs[3],h[3],0],[xs[4],h[4],0],
+      [xs[0],0,w],[xs[1],0,w],[xs[2],0,w],[xs[3],0,w],[xs[4],0,w],
+      [xs[0],h[0],w],[xs[1],h[1],w],[xs[2],h[2],w],[xs[3],h[3],w],[xs[4],h[4],w],
+    ];
+    const areas=ALL_MBR.map((_,k)=>{
+      if(k>=34) return 1;
+      const s=Math.floor(rng()*3)+1;
+      return Math.max(1,Math.round(s+(1-s)*e));
+    });
+    gens.push({
+      gen:g+1, nodes, areas,
+      types:ALL_MBR.map((_,k)=>k>=34?'brace':'frame'),
+      mass_g:lerp(480,160,e)+(rng()-.5)*30*(1-e),
+      load_kg:lerp(1.2,5.8,e)+(rng()-.5)*.5*(1-e),
+      feasible:e>.3, w_cm:w,
+    });
+  }
+  return gens;
+}
+
+/* ================================================================
+   ESTADO GLOBAL DA ANIMAÇÃO (mutável pelo fetch)
+================================================================ */
+let GENS = buildSyntheticData();
+let N_GENS = GENS.length;
+let t0 = null;
+
+let   ANIM_S  = 40.0; // duração em segundos — controlada pelo slider
+const PAUSE_S = 1.5;  // pausa no final antes de reiniciar
+
+/* ================================================================
+   CENA THREE.JS  (inicializada após THREE carregar)
+================================================================ */
+function initScene(){
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x070710);
+
+  // Câmera: acima da ponte, lateral, olhando ligeiramente para baixo
+  // Ponte: X 0–40 cm, Y 0–11 cm, Z 0–11 cm
+  const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 2000);
+  camera.position.set(-8, 28, 48);
+  camera.lookAt(20, 5, 5);
+
+  // Luzes
+  scene.add(new THREE.AmbientLight(0xffffff, 0.42));
+
+  const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+  sun.position.set(15, 35, 30);
+  sun.castShadow = true;
+  sun.shadow.mapSize.width = sun.shadow.mapSize.height = 2048;
+  scene.add(sun);
+
+  const fill = new THREE.DirectionalLight(0x4455ff, 0.22);
+  fill.position.set(-10, -5, -15);   // set() correto — não Object.assign
+  scene.add(fill);
+
+  // Chão + Grid
+  const gnd = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshLambertMaterial({color:0x0c0c1c})
+  );
+  gnd.rotation.x = -Math.PI/2; gnd.position.y = -0.5; gnd.receiveShadow = true;
+  scene.add(gnd);
+  const grid = new THREE.GridHelper(400, 80, 0x181830, 0x101020);
+  grid.position.y = -0.4;
+  scene.add(grid);
+
+  /* ---- Materiais ---- */
+  const COL_FRAME = [0x3b82f6, 0x22c55e, 0xef4444];
+  const mats = COL_FRAME.map(c => new THREE.MeshPhongMaterial({color:c, shininess:80}));
+  const matBrace = new THREE.MeshPhongMaterial({color:0x7799bb, shininess:40, opacity:.75, transparent:true});
+  const matNode  = new THREE.MeshPhongMaterial({color:0xddddee, shininess:100});
+  const matNodeC = new THREE.MeshPhongMaterial({color:0xff3333, shininess:100});
+  const matSup   = new THREE.MeshPhongMaterial({color:0x8899aa});
+
+  /* ---- Objetos persistentes ---- */
+  const truss = new THREE.Group();
+  scene.add(truss);
+
+  const STICK_W = 1.0;   // largura do palito (cm visual)
+  const STICK_D = 0.28;  // espessura base (1 palito)
+  const X_AXIS  = new THREE.Vector3(1, 0, 0);
+
+  const mbrMeshes = ALL_MBR.map((_, k) => {
+    const isBrace = k >= 34;
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(1, STICK_W, STICK_D),
+      isBrace ? matBrace.clone() : mats[0].clone()
+    );
+    m.castShadow = !isBrace;
+    truss.add(m);
+    return m;
+  });
+
+  const nodeMeshes = Array.from({length:20}, (_, i) => {
+    const isC = (i===2 || i===12);
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.45, 14, 14),
+      isC ? matNodeC.clone() : matNode.clone()
+    );
+    m.castShadow = true;
+    truss.add(m);
+    return m;
+  });
+
+  const SUP_NODES = [0, 4, 10, 14];
+  const supMeshes = SUP_NODES.map(() => {
+    const m = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.2, 7), matSup.clone());
+    truss.add(m);
+    return m;
+  });
+
+  let arrowObjs = [];
+
+  function v3(n){ return new THREE.Vector3(n[0], n[1], n[2] || 0); }
+
+  /* ---- Atualiza treliça ---- */
+  function updateTruss(data){
+    const {nodes, areas, types} = data;
+
+    ALL_MBR.forEach(([i, j], k) => {
+      const A = v3(nodes[i]), B = v3(nodes[j]);
+      const dir = new THREE.Vector3().subVectors(B, A);
+      const len = dir.length();
+      if(len < 0.01) return;
+
+      const m   = mbrMeshes[k];
+      const n   = areas[k] || 1;
+      m.scale.set(len, 1, n);
+      m.position.addVectors(A, B).multiplyScalar(0.5);
+
+      const isBrace = types ? types[k]==='brace' : k>=34;
+      if(!isBrace) m.material.color.setHex(COL_FRAME[Math.min(n, 3) - 1]);
+
+      const dn = dir.clone().normalize();
+      if(Math.abs(dn.dot(X_AXIS)) < 0.9999){
+        m.quaternion.setFromUnitVectors(X_AXIS, dn);
+      } else {
+        m.quaternion.identity();
+        if(dn.x < 0) m.rotateZ(Math.PI);
+      }
+    });
+
+    nodes.forEach((n, i) => nodeMeshes[i].position.set(n[0], n[1], n[2] || 0));
+
+    SUP_NODES.forEach((ni, si) => {
+      const n = nodes[ni];
+      supMeshes[si].position.set(n[0], -1.1, n[2] || 0);
+    });
+
+    arrowObjs.forEach(a => truss.remove(a));
+    arrowObjs = [];
+    [2, 12].forEach(ni => {
+      const pos = v3(nodes[ni]);
+      const a = new THREE.ArrowHelper(
+        new THREE.Vector3(0, -1, 0),
+        new THREE.Vector3(pos.x, pos.y + 7, pos.z),
+        7, 0xff3333, 1.8, 1.0
+      );
+      truss.add(a);
+      arrowObjs.push(a);
+    });
+  }
+
+  /* ---- Interpolação ---- */
+  function iLerp(gA, gB, a){
+    return {
+      nodes:   gA.nodes.map((nA, i) => nA.map((v, d) => lerp(v, gB.nodes[i][d], a))),
+      areas:   gA.areas.map((v, i) => Math.round(lerp(v, gB.areas[i], a))),
+      types:   gA.types,
+      mass_g:  lerp(gA.mass_g,  gB.mass_g,  a),
+      load_kg: lerp(gA.load_kg, gB.load_kg, a),
+      feasible: gA.feasible,
+    };
+  }
+
+  /* ---- HUD ---- */
+  const elGen = document.getElementById('gen');
+  const elMv  = document.getElementById('mv');
+  const elLv  = document.getElementById('lv');
+  const elFv  = document.getElementById('fv');
+  const elBar = document.getElementById('bar');
+
+  /* ---- Loop de animação — reinicia automaticamente ---- */
+  function tick(ts){
+    requestAnimationFrame(tick);
+    if(!t0) t0 = ts;
+
+    const elapsed = (ts - t0) / 1000;
+    const cycle   = ANIM_S + PAUSE_S;
+    const phase   = elapsed % cycle;            // posição dentro do ciclo
+    const prog    = Math.min(phase / ANIM_S, 1.0);
+
+    const pos  = prog * (N_GENS - 1);
+    const gi   = Math.min(Math.floor(pos), N_GENS - 2);
+    const a    = pos - gi;
+    const gB   = GENS[Math.min(gi + 1, N_GENS - 1)];
+
+    const data = iLerp(GENS[gi], gB, a);
+    updateTruss(data);
+
+    const displayGen = Math.round(pos) + 1;
+    elGen.textContent  = `Geração ${displayGen} / ${N_GENS}`;
+    elMv.textContent   = data.mass_g.toFixed(1);
+    elLv.textContent   = data.load_kg.toFixed(3);
+    elFv.textContent   = data.feasible ? '✓ sim' : '✗ não';
+    elFv.style.color   = data.feasible ? '#86efac' : '#f87171';
+    elBar.style.width  = (prog * 100) + '%';
+
+    renderer.render(scene, camera);
+  }
+
+  requestAnimationFrame(tick);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}
+
+/* ================================================================
+   AGUARDA THREE.JS CARREGAR E INICIA A CENA
+================================================================ */
+function waitForThree(tries){
+  if(typeof THREE !== 'undefined'){
+    // Three.js carregado — verifica ag_data.js (local) ou fetch ag_data.json (servidor)
+    function applyRealData(json){
+      GENS   = json;
+      N_GENS = json.length;
+      t0     = null;
+      document.getElementById('note').innerHTML =
+        `Dados reais · ${N_GENS} gen · loop contínuo`;
+    }
+
+    if(window.AG_DATA && window.AG_DATA.length){
+      // ag_data.js carregado via <script src> — funciona com file://
+      applyRealData(window.AG_DATA);
+    } else {
+      // Tenta fetch (funciona quando servido via run_viewer.bat)
+      fetch('ag_data.json')
+        .then(r => { if(!r.ok) throw 0; return r.json(); })
+        .then(applyRealData)
+        .catch(() => {
+          document.getElementById('note').innerHTML =
+            'Dados sintéticos · 30 gen · loop contínuo<br>' +
+            'Execute run_export.bat para gerar ag_data.js';
+        });
+    }
+
+    initScene();
+
+    // Slider de velocidade
+    const slider = document.getElementById('speed-range');
+    const sliderLabel = document.getElementById('speed-label');
+    slider.addEventListener('input', () => {
+      ANIM_S = parseFloat(slider.value);
+      sliderLabel.textContent = ANIM_S + ' s';
+      t0 = null; // reinicia ciclo com nova velocidade
+    });
+  } else if(tries > 0){
+    setTimeout(() => waitForThree(tries - 1), 100);
+  } else {
+    document.getElementById('note').textContent =
+      'ERRO: three.js não carregou. Execute run_viewer.bat.';
+  }
+}
+
+waitForThree(30);   // tenta por até 3 segundos
+</script>
+</body>
+</html>

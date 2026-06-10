@@ -1,0 +1,17 @@
+# Gerados pelo AG — regenere com run_export.bat
+ag_data.json
+
+# Biblioteca baixada pelo setup.bat — CDN é fallback automático
+three.min.js
+
+# Ambiente virtual Python
+.venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
