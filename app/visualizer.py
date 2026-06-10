@@ -6,233 +6,178 @@ import matplotlib.animation as animation
 from matplotlib.lines import Line2D
 from app.utils import Utils
 
+class Visualizer:
+    """Ferramenta para desenhar a geometria bidimensional e a evolução multiobjetivo em Pareto."""
 
-AZUL  = "#1f4ef5"
-VERDE = "#16a34a"
-VERM  = "#ef2b2b"
-PRETO = "#000000"
-CINZA = "#b8b8b8"
-ROXO  = "#7e22ce"
-ROSA  = "#f3b0b0"
+    def __init__(self):
+        """Define configurações visuais, paleta de cor e o manipulador geométrico."""
+        self.utils = Utils()
+        self.AZUL = "#1f4ef5"
+        self.VERDE = "#16a34a"
+        self.VERM = "#ef2b2b"
+        self.PRETO = "#111111"
+        self.CINZA = "#9ca3af"
+        self.ROXO = "#7e22ce"
+        self.LARANJA = "#f97316"
+        
+        self.CONNECTIVITY = [
+            (0, 1), (1, 2), (2, 3), (3, 4),
+            (5, 6), (6, 7), (7, 8), (8, 9),
+            (0, 5), (6, 1), (7, 2), (8, 3), (4, 9),
+            (5, 1), (6, 2), (8, 2), (9, 3)
+        ]
+        self.NODE_NAMES = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+        self.LOWER_NODES = {0, 1, 2, 3, 4}
 
+    def _cor_barra(self, n):
+        """Retorna a cor baseada no número de camadas de palitos."""
+        return (self.AZUL, self.VERDE, self.VERM)[min(max(int(n), 1), 3) - 1]
 
-def _area_color(area: float) -> str:
-    idx = int(round(area / 1e-4))
-    if idx <= 3:
-        return AZUL
-    elif idx == 4:
-        return VERDE
-    else:
-        return VERM
+    def _espessura_barra(self, n):
+        """Retorna a espessura visual da linha baseada no número de camadas."""
+        return 1.1 + int(n) * 1.0
 
+    def _desenhar_apoio(self, ax, x, y, rolete=False):
+        """Desenha a representação gráfica dos apoios fixos e móveis."""
+        h, b = 0.9, 0.55
+        ax.plot([x - b, x, x + b], [y - h, y, y - h], color=self.PRETO, lw=1.1, zorder=6)
+        ax.plot([x - b - 0.1, x + b + 0.1], [y - h, y - h], color=self.PRETO, lw=1.1, zorder=6)
+        for dx in np.linspace(-b, b, 5):
+            ax.plot([x + dx, x + dx - 0.18], [y - h, y - h - 0.22], color=self.PRETO, lw=0.7, zorder=6)
+        if rolete:
+            ax.plot([x - b - 0.1, x + b + 0.1], [y - h - 0.30, y - h - 0.30], color=self.PRETO, lw=1.1, zorder=6)
 
-def _desenhar_apoio(ax, x, y, rolico=False):
-    h = 0.42
-    b = 0.30
-    ax.plot([x - b, x, x + b], [y - h, y, y - h], color=PRETO, lw=1.3, zorder=6)
-    ax.plot([x - b - 0.05, x + b + 0.05], [y - h, y - h], color=PRETO, lw=1.3, zorder=6)
-    for dx in np.linspace(-b, b, 6):
-        ax.plot([x + dx, x + dx - 0.12], [y - h, y - h - 0.16], color=PRETO, lw=0.8, zorder=6)
-    if rolico:
-        ax.plot([x - b - 0.05, x + b + 0.05], [y - h - 0.20, y - h - 0.20], color=PRETO, lw=1.3, zorder=6)
+    def _desenhar_trelica(self, ax, ind, gen, total_gens):
+        """Desenha a geometria 2D da treliça, incluindo nós, barras e o relatório textual."""
+        ax.clear()
+        nos, barras, _, _ = self.utils.calcular_comprimentos_howe(ind.p, ind.h)
+        
+        ax.set_facecolor("white")
+        ax.set_xlim(-3.0, 43.5)
+        ax.set_ylim(-3.5, float(max(ind.h)) + 5.0)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x  (cm)", fontsize=9, color=self.PRETO)
+        ax.set_ylabel("y  (cm)", fontsize=9, color=self.PRETO)
+        ax.tick_params(colors=self.PRETO, labelsize=8)
+        
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        for sp in ("left", "bottom"):
+            ax.spines[sp].set_color(self.PRETO)
 
+        for k, (i, j) in enumerate(self.CONNECTIVITY):
+            xa, ya = nos[i]
+            xb, yb = nos[j]
+            ax.plot([xa, xb], [ya, yb],
+                    color=self._cor_barra(ind.n[k]), lw=self._espessura_barra(ind.n[k]),
+                    solid_capstyle="round", zorder=2)
+            xm, ym = (xa + xb) / 2, (ya + yb) / 2
+            ax.text(xm, ym + 0.22, str(int(ind.n[k])),
+                    ha="center", va="bottom", fontsize=6, color=self.PRETO, zorder=5)
 
-def _desenhar_quadro(ax, cromossomo, nuvem, fronteira_plot, melhor_obj, gen, num_geracoes,
-                     forcas_externas, barras_base, barras_verticais):
-    utils = Utils()
-    lb = cromossomo[:barras_base]
-    lv = cromossomo[barras_base:barras_base + barras_verticais]
-    areas = cromossomo[barras_base + barras_verticais:]
+        for idx, (xn, yn) in enumerate(nos):
+            name = self.NODE_NAMES[idx]
+            color = self.LARANJA if name == "C" else self.PRETO
+            ax.scatter([xn], [yn], s=28, color=color, zorder=4)
+            dy = -0.75 if idx in self.LOWER_NODES else 0.55
+            va = "top" if idx in self.LOWER_NODES else "bottom"
+            ax.text(xn, yn + dy, name, ha="center", va=va,
+                    fontsize=9, color=color, fontweight="bold", zorder=5)
 
-    nos, barras, comprimentos, _ = utils.calcular_comprimentos_howe(lb, lv)
+        self._desenhar_apoio(ax, nos[0][0], nos[0][1], rolete=False)
+        self._desenhar_apoio(ax, nos[4][0], nos[4][1], rolete=True)
 
-    ax.clear()
-    ax_p = ax.inset_axes([0.42, 0.56, 0.32, 0.40])
-    ax.set_facecolor("white")
-    x_max = float(max(nos[:, 0]))
-    ax.set_xlim(-1.0, x_max + 1.2)
-    ax.set_ylim(-1.8, 8.4)
-    ax.set_aspect("equal")
-    ax.set_xticks(np.arange(0, x_max + 1, 2))
-    ax.set_yticks([0, 2, 4, 6, 8])
-    ax.tick_params(colors=PRETO, labelsize=9)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    for spine in ("left", "bottom"):
-        ax.spines[spine].set_color(PRETO)
+        xc, yc = nos[2]
+        ax.annotate("", xy=(xc, yc - 2.0), xytext=(xc, yc),
+                    arrowprops=dict(arrowstyle="-|>", color=self.LARANJA, lw=2.0), zorder=5)
+        ax.text(xc, yc - 2.4, "P", ha="center", va="top",
+                fontsize=11, color=self.LARANJA, fontweight="bold", zorder=5)
 
-    for k, (i, j) in enumerate(barras):
-        ax.plot(
-            [nos[i, 0], nos[j, 0]],
-            [nos[i, 1], nos[j, 1]],
-            color=_area_color(areas[k]),
-            lw=2.7,
-            solid_capstyle="round",
-            zorder=2,
+        handles = [
+            Line2D([0], [0], color=self.AZUL,  lw=3, label="1 palito"),
+            Line2D([0], [0], color=self.VERDE, lw=3, label="2 palitos"),
+            Line2D([0], [0], color=self.VERM,  lw=3, label="3 palitos"),
+        ]
+        ax.legend(handles=handles, loc="upper left", fontsize=8,
+                  frameon=True, framealpha=0.9, edgecolor=self.PRETO, handlelength=1.8)
+
+        ax.set_title(
+            f"Treliça Howe — Palitos  |  Geração {gen}/{total_gens}",
+            fontsize=12, color=self.PRETO, fontweight="bold", pad=10,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=self.PRETO, lw=0.8),
         )
 
-    ax.scatter(nos[:, 0], nos[:, 1], s=34, color=PRETO, zorder=4)
-
-    rotulos = ["A", "B", "C", "D", "E"]
-    for idx in range(5):
-        ax.text(nos[idx, 0], nos[idx, 1] - 0.55, rotulos[idx],
-                ha="center", va="top", fontsize=11, color=PRETO, zorder=5)
-
-    _desenhar_apoio(ax, nos[0, 0], nos[0, 1], rolico=False)
-    _desenhar_apoio(ax, nos[4, 0], nos[4, 1], rolico=True)
-
-    forcas_aplicadas = [(no, fx, fy) for (no, fx, fy) in forcas_externas if abs(fy) > 0 or abs(fx) > 0]
-    if forcas_aplicadas:
-        y_tail = max(nos[no][1] for (no, fx, fy) in forcas_aplicadas) + 1.2
-        for (no, fx, fy) in forcas_aplicadas:
-            x, y = nos[no]
-            mag = abs(fy)
-            ax.annotate(
-                "", xy=(x, y), xytext=(x, y_tail),
-                arrowprops=dict(arrowstyle="-|>", color=PRETO, lw=1.7),
-                zorder=5,
-            )
-            ax.text(x, y_tail + 0.10, f"{mag:.0f} kN", ha="center", va="bottom",
-                    fontsize=10, color=PRETO, zorder=5)
-
-    handles = [
-        Line2D([0], [0], color=AZUL,  lw=3, label=r"$A_1 = 3.\times10^{-4}\ m^2$"),
-        Line2D([0], [0], color=VERDE, lw=3, label=r"$A_2 = 4.\times10^{-4}\ m^2$"),
-        Line2D([0], [0], color=VERM,  lw=3, label=r"$A_3 = 5.\times10^{-4}\ m^2$"),
-    ]
-    ax.legend(handles=handles, loc="upper right", fontsize=10, frameon=False,
-              handlelength=1.8, bbox_to_anchor=(1.0, 1.0))
-
-    ax.text(0.66, 0.74, "OPTIMAL TRUSS", transform=ax.transAxes,
-            color=VERM, fontsize=15, fontweight="bold", ha="center", zorder=5)
-
-    massa_b, delta_b = (melhor_obj if melhor_obj else (0.0, 0.0))
-    ax.text(
-        0.60, 0.40,
-        f"$\\downarrow\\ \\delta$ (node C): {delta_b:.2f} mm\n\nm: {massa_b:.1f} kg",
-        transform=ax.transAxes, ha="center", va="center", fontsize=11, color=PRETO,
-        bbox=dict(boxstyle="round,pad=0.5", fc="white", ec=PRETO, lw=1.0), zorder=7,
-    )
-
-    ax.set_title(
-        f"Genetic_Algorithm _Optimization _Truss (Gen : {gen})",
-        fontsize=13, color=PRETO, fontweight="bold", pad=12,
-        bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=PRETO, lw=1.0),
-    )
-
-
-    ax_p.clear()
-    ax_p.set_facecolor("white")
-    if nuvem:
-        arr = np.array(nuvem)
-        if arr.shape[1] >= 3:
-            fact = arr[:, 2] > 0.5
-            infact = ~fact
-            if infact.any():
-                ax_p.scatter(arr[infact, 0], arr[infact, 1], s=10, color=ROSA,
-                             alpha=0.30, label="Infactivel", zorder=1)
-            if fact.any():
-                ax_p.scatter(arr[fact, 0], arr[fact, 1], s=14, color=CINZA,
-                             alpha=0.85, label="Indiv.", zorder=2)
-        else:
-            ax_p.scatter(arr[:, 0], arr[:, 1], s=14, color=CINZA, alpha=0.85,
-                         label="Indiv.", zorder=2)
-    if fronteira_plot:
-        fp = np.array(fronteira_plot)
-        ax_p.plot(fp[:, 0], fp[:, 1], color=ROXO, lw=1.6, zorder=4)
-        ax_p.scatter(fp[:, 0], fp[:, 1], s=24, color=ROXO, edgecolors="white",
-                     linewidths=0.5, label="Fronteira Pareto", zorder=5)
-    if melhor_obj:
-        ax_p.scatter([melhor_obj[0]], [melhor_obj[1]], s=55, color=AZUL,
-                     edgecolors="white", linewidths=0.6, label="Fittest Indiv.", zorder=6)
-
-    referencia = []
-    if nuvem:
-        arr_ref = np.array(nuvem)
-        if arr_ref.shape[1] >= 3:
-            factiveis = arr_ref[arr_ref[:, 2] > 0.5][:, :2]
-            if len(factiveis):
-                referencia.append(factiveis)
-    if fronteira_plot:
-        referencia.append(np.array(fronteira_plot))
-    if referencia:
-        ref = np.vstack(referencia)
-        x_mn, x_mx = ref[:, 0].min(), ref[:, 0].max()
-        y_mn, y_mx = ref[:, 1].min(), ref[:, 1].max()
-        dx = (x_mx - x_mn) or 1.0
-        dy = (y_mx - y_mn) or 1.0
-        ax_p.set_xlim(x_mn - 0.06 * dx, x_mx + 0.10 * dx)
-        ax_p.set_ylim(max(0.0, y_mn - 0.18 * dy), y_mx + 0.25 * dy)
-
-    ax_p.set_xlabel("Structural truss mass (kg)", fontsize=8, color=PRETO)
-    ax_p.set_ylabel("Deformation of node C (mm)", fontsize=8, color=PRETO)
-    ax_p.tick_params(colors=PRETO, labelsize=7)
-    ax_p.legend(fontsize=6.2, loc="upper right", framealpha=0.9,
-                markerscale=1.0, handletextpad=0.3, ncol=2)
-    for spine in ax_p.spines.values():
-        spine.set_color(PRETO)
-
-
-def animar_evolucao(
-    historico_cromossomos,
-    historico_nuvem,
-    historico_fronteira_plot,
-    historico_melhor_obj,
-    num_geracoes: int,
-    forcas_externas,
-    barras_base: int = 4,
-    barras_verticais: int = 3,
-    gif_path: str = "best_truss.gif",
-):
-    fig = plt.figure(figsize=(10, 9), facecolor="white")
-    ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
-
-    def update(frame):
-        nuvem_acumulada = []
-        for g in range(min(frame + 1, len(historico_nuvem))):
-            nuvem_acumulada.extend(historico_nuvem[g])
-        fronteira_plot = historico_fronteira_plot[frame] if frame < len(historico_fronteira_plot) else []
-        _desenhar_quadro(
-            ax,
-            historico_cromossomos[frame],
-            nuvem_acumulada,
-            fronteira_plot,
-            historico_melhor_obj[frame] if frame < len(historico_melhor_obj) else None,
-            frame + 1, num_geracoes, forcas_externas, barras_base, barras_verticais,
+        info = (
+            f"Fator S.: {ind.fator_seguranca:.3f}\n"
+            f"Massa   : {ind.massa_g:.2f} g\n"
+            f"Tens.Máx: {ind.tensao_max_mpa:.2f} MPa\n"
+            f"Larg. (w): {ind.w:.2f} cm\n"
         )
-        return []
+        ax.text(0.98, 0.98, info, transform=ax.transAxes,
+                ha="right", va="top", fontsize=8, color=self.PRETO, family="monospace",
+                bbox=dict(boxstyle="round,pad=0.45", fc="white", ec=self.PRETO, lw=0.8),
+                zorder=7)
 
-    ani = animation.FuncAnimation(
-        fig, update, frames=len(historico_cromossomos),
-        interval=120, repeat=False, blit=False,
-    )
+    def _desenhar_scatter(self, ax, pareto_pts, best_obj, gen, total_gens):
+        """Desenha o espaço de busca mapeando Massa Total versus Tensão Máxima Atuante."""
+        ax.clear()
+        ax.set_facecolor("white")
+        ax.tick_params(colors=self.PRETO, labelsize=8)
+        ax.set_xlabel("Massa total  (g)", fontsize=9, color=self.PRETO)
+        ax.set_ylabel("Tensão Máx. Atuante (MPa)", fontsize=9, color=self.PRETO)
+        ax.set_title("Espaço de busca", fontsize=10, color=self.PRETO, fontweight="bold", pad=8)
+        ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5, color=self.CINZA)
+        
+        for sp in ax.spines.values():
+            sp.set_color(self.PRETO)
 
-    print(f"Salvando animacao em '{gif_path}'...")
-    ani.save(gif_path, writer="pillow", fps=8, dpi=90)
-    print(f"GIF salvo: {gif_path}")
-    plt.close(fig)
+        if pareto_pts:
+            fp = np.asarray(pareto_pts, dtype=float)
+            if len(fp) > 0:
+                fp = fp[fp[:, 0].argsort()]
+                ax.plot(fp[:, 0], fp[:, 1], color=self.ROXO, lw=1.6, zorder=4)
+                ax.scatter(fp[:, 0], fp[:, 1], s=28, color=self.ROXO,
+                           edgecolors="white", linewidths=0.5,
+                           label="Front. Pareto", zorder=5)
 
+        if best_obj:
+            ax.scatter([best_obj[0]], [best_obj[1]], s=70, color=self.AZUL,
+                       edgecolors="white", linewidths=0.8,
+                       label="Melhor indiv.", zorder=6)
 
-def gerar_imagem_final(
-    cromossomo,
-    nuvem,
-    fronteira_plot,
-    melhor_obj,
-    gen,
-    num_geracoes,
-    forcas_externas,
-    barras_base: int = 4,
-    barras_verticais: int = 3,
-    png_path: str = "best_truss_final.png",
-):
-    fig = plt.figure(figsize=(10, 9), facecolor="white")
-    ax = fig.add_axes([0.07, 0.07, 0.9, 0.84])
+        ax.legend(fontsize=7.5, loc="upper right", framealpha=0.9,
+                  markerscale=1.1, handletextpad=0.4, edgecolor=self.PRETO)
 
-    _desenhar_quadro(
-        ax, cromossomo, nuvem, fronteira_plot, melhor_obj,
-        gen, num_geracoes, forcas_externas, barras_base, barras_verticais,
-    )
+        ax.text(0.03, 0.03, f"Gen {gen}/{total_gens}",
+                transform=ax.transAxes, fontsize=8, color=self.PRETO,
+                va="bottom", ha="left",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=self.PRETO, lw=0.6))
 
-    fig.savefig(png_path, dpi=130, facecolor="white")
-    print(f"Imagem final salva: {png_path}")
-    plt.close(fig)
+    def gerar_animacao(self, historico_melhor, historico_fronteira, total_gens, caminho_gif):
+        """Renderiza e salva a evolução do algoritmo genético em um arquivo GIF dual-plot."""
+        fig = plt.figure(figsize=(14, 6), facecolor="white")
+        ax_t = fig.add_axes([0.04, 0.10, 0.56, 0.83])
+        ax_s = fig.add_axes([0.67, 0.11, 0.29, 0.80])
+
+        def update(frame_idx):
+            self._desenhar_trelica(ax_t, historico_melhor[frame_idx], frame_idx + 1, total_gens)
+            best_obj = [historico_melhor[frame_idx].massa_g, historico_melhor[frame_idx].tensao_max_mpa]
+            self._desenhar_scatter(ax_s, historico_fronteira[frame_idx], best_obj, frame_idx + 1, total_gens)
+            return []
+
+        ani = animation.FuncAnimation(fig, update, frames=total_gens, interval=140, repeat=False, blit=False)
+        ani.save(caminho_gif, writer="pillow", fps=7, dpi=90)
+        plt.close(fig)
+
+    def gerar_imagem_otima(self, melhor_ind, fronteira_final, total_gens, caminho_png):
+        """Renderiza e salva a figura estática final da melhor treliça e da fronteira de Pareto."""
+        fig = plt.figure(figsize=(14, 6), facecolor="white")
+        ax_t = fig.add_axes([0.04, 0.10, 0.56, 0.83])
+        ax_s = fig.add_axes([0.67, 0.11, 0.29, 0.80])
+        
+        self._desenhar_trelica(ax_t, melhor_ind, total_gens, total_gens)
+        best_obj = [melhor_ind.massa_g, melhor_ind.tensao_max_mpa]
+        self._desenhar_scatter(ax_s, fronteira_final, best_obj, total_gens, total_gens)
+        
+        fig.savefig(caminho_png, dpi=130, facecolor="white")
+        plt.close(fig)

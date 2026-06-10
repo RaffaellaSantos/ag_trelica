@@ -1,105 +1,56 @@
 import numpy as np
 
-class Utils():
+class Utils:
+    """Fornece as ferramentas matemáticas e físicas para a avaliação da treliça Howe."""
 
-    def calcular_comprimentos_howe(self, l_bases, l_verticais):
+    def calcular_comprimentos_howe(self, p, h):
+        """Calcula a conectividade, coordenadas, comprimentos e ângulos da treliça Howe."""
+        p_total = np.sum(p)
+        if p_total == 0:
+            p_total = 1.0
+        p_norm = (p / p_total) * 35.0
+        x = [0.0, p_norm[0], p_norm[0] + p_norm[1], p_norm[0] + p_norm[1] + p_norm[2], 35.0]
         nos = np.array([
-            [0.0, 0.0],
-            [l_bases[0], 0.0],
-            [l_bases[0] + l_bases[1], 0.0],
-            [l_bases[0] + l_bases[1] + l_bases[2], 0.0],
-            [sum(l_bases), 0.0],
-            [l_bases[0], l_verticais[0]],
-            [l_bases[0] + l_bases[1], l_verticais[1]],
-            [l_bases[0] + l_bases[1] + l_bases[2], l_verticais[2]]
+            [x[0], 0.0], [x[1], 0.0], [x[2], 0.0], [x[3], 0.0], [x[4], 0.0],
+            [x[0], h[0]], [x[1], h[1]], [x[2], h[2]], [x[3], h[3]], [x[4], h[4]]
         ])
-
         barras = np.array([
             [0, 1], [1, 2], [2, 3], [3, 4],
-            [0, 5],
-            [1, 5],
-            [5, 2],
-            [2, 6],
-            [2, 7],
-            [3, 7],
-            [7, 4],
-            [5, 6],
-            [6, 7]
+            [5, 6], [6, 7], [7, 8], [8, 9],
+            [0, 5], [6, 1], [7, 2], [8, 3], [4, 9],
+            [5, 1], [6, 2], [8, 2], [9, 3]
         ])
-
         comprimentos = []
         angulos = []
-
         for i, j in barras:
             dx = nos[j][0] - nos[i][0]
             dy = nos[j][1] - nos[i][1]
             L = np.sqrt(dx**2 + dy**2)
             comprimentos.append(L)
-            angulos.append((dx/L, dy/L))
-
+            angulos.append((dx / L, dy / L))
         return nos, barras, comprimentos, angulos
 
-    def gerar_vetor_areas(self, num_barras, area):
-        return [area for _ in range(num_barras)]
-
-    def calcular_reacoes_e_forcas(self, nos, barras, angulos, forcas_externas, forcas_virtuais):
+    def calcular_reacoes_e_forcas(self, nos, barras, angulos, carga_kg):
+        """Avalia os esforços axiais reais nas barras usando o método dos nós e álgebra linear."""
         num_nos = len(nos)
         num_barras = len(barras)
         num_reacoes = 3
-
         A = np.zeros((2 * num_nos, num_barras + num_reacoes))
-
         for k, (i, j) in enumerate(barras):
             cx, cy = angulos[k]
-            A[2*i, k] = cx
-            A[2*i+1, k] = cy
-            A[2*j, k] = -cx
-            A[2*j+1, k] = -cy
-
+            A[2 * i, k] = cx
+            A[2 * i + 1, k] = cy
+            A[2 * j, k] = -cx
+            A[2 * j + 1, k] = -cy
         A[0, num_barras] = 1.0
         A[1, num_barras + 1] = 1.0
-        A[2*4+1, num_barras + 2] = 1.0
-
+        A[2 * 4 + 1, num_barras + 2] = 1.0
         P_real = np.zeros(2 * num_nos)
-        for no, fx, fy in forcas_externas:
-            P_real[2*no] = fx
-            P_real[2*no+1] = fy
-
-        P_virtual = np.zeros(2 * num_nos)
-        for no, fx, fy in forcas_virtuais:
-            P_virtual[2*no] = fx
-            P_virtual[2*no+1] = fy
-
-        solucao_real = np.linalg.solve(A, -P_real)
-        solucao_virtual = np.linalg.solve(A, -P_virtual)
-
-        f_real = solucao_real[:num_barras]
-        reacoes_reais = solucao_real[num_barras:]
-        f_virtual = solucao_virtual[:num_barras]
-
-        return f_real, reacoes_reais, f_virtual
-
-    def calcular_deslocamento_virtual(self, barras, comprimentos, areas, f_real, f_virtual, E_GPa=200.0):
-        dados = []
-        deslocamento_total = 0.0
-        E_kNm2 = E_GPa * 1e6
-
-        for k in range(len(barras)):
-            L = comprimentos[k]
-            A_sec = areas[k]
-            F_kN = f_real[k]
-            F_v = f_virtual[k]
-
-            delta_m = (F_kN * F_v * L) / (E_kNm2 * A_sec)
-            delta_mm = delta_m * 1000.0
-            deslocamento_total += delta_mm
-
-            dados.append({
-                'Barra': f"{barras[k][0]}-{barras[k][1]}",
-                'Comprimento (m)': round(L, 4),
-                'Forca Real (kN)': round(F_kN, 2),
-                'Forca Virtual (kN)': round(F_v, 2),
-                'Deslocamento (mm)': round(delta_mm, 3)
-            })
-
-        return dados, deslocamento_total
+        carga_newtons = carga_kg * 9.81
+        P_real[2 * 2 + 1] = -carga_newtons
+        try:
+            solucao_real = np.linalg.solve(A, -P_real)
+            f_real = solucao_real[:num_barras]
+            return f_real
+        except np.linalg.LinAlgError:
+            return np.zeros(num_barras)

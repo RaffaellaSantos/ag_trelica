@@ -3,161 +3,255 @@ import random
 import math
 from app.utils import Utils
 
+class Individuo:
+    """Estrutura de dados que armazena as características genéticas e físicas da treliça."""
+
+    def __init__(self, p, h, w, n):
+        """Inicializa os genes e os parâmetros multiobjetivo."""
+        self.p = p
+        self.h = h
+        self.w = w
+        self.n = n
+        self.massa_g = float('inf')
+        self.tensao_max_mpa = float('inf')
+        self.fator_seguranca = 0.0
+        self.valido = False
+        self.rank = -1
+        self.distancia_aglomeracao = 0.0
+        self.dominados = []
+        self.num_dominantes = 0
+        self.dados_extras = {}
+
 class TrussAG:
-    def __init__(self, tam_populacao=150, num_geracoes=200, fator_seguranca=2.0):
+    """Implementa o Algoritmo Genético Multiobjetivo (Fronteira de Pareto) para Treliças 3D."""
+
+    def __init__(self, tam_populacao=150, num_geracoes=150, carga_projeto_kg=15.0):
+        """Configura as propriedades físicas, penalidades e limiares do algoritmo."""
         self.tam_populacao = tam_populacao
         self.num_geracoes = num_geracoes
+        self.carga_projeto_kg = carga_projeto_kg
         self.utils = Utils()
         
-        # Propriedades do Abaixador de Língua
-        self.STICK_LENGTH_CM = 14.0
-        self.SOBREPOSICAO_CM = 1.0
+        # --- ATUALIZADO CONFORME PDF DA ATIVIDADE 9 ---
+        self.L_PALITO_CM = 11.4       # Comprimento do palito 
+        self.H_SECTION_M = 0.010      # Largura do palito (1,0 cm) 
+        self.T_SECTION_M = 0.002      # Espessura do palito (0,2 cm) 
+        self.SOBREPOSICAO_CM = 1.0    
+        self.RHO = 510.0
+        self.E_PA = 3.5e9
+        self.SIGMA_T_YIELD = 55e6
+        self.SIGMA_C_YIELD = 35e6
         
-        # Orientação "De Cutelo" (Na Vertical)
-        self.H_SECTION = 0.014  # Altura no eixo Y (1.4 cm)
-        self.T_SECTION = 0.002  # Espessura no eixo Z (0.2 cm) por palito
+        # Limites contínuos atualizados para o máximo de 11,4 cm 
+        self.P_MIN, self.P_MAX = 3.0, 11.4
+        self.H_MIN, self.H_MAX = 3.0, 11.4
+        self.W_MIN, self.W_MAX = 4.0, 11.4
+        # ----------------------------------------------
         
-        self.RHO = 510.0 # kg/m³ da madeira
-        self.E_GPa = 3.5 # Módulo de Elasticidade (Bétula/Madeira)
-        
-        # Tensões Limites e Fator de Segurança
-        self.FS = fator_seguranca
-        self.SIGMA_T_ALLOW = 55e6 / self.FS # Tensão admissível Tração
-        self.SIGMA_C_ALLOW = 35e6 / self.FS # Tensão admissível Compressão
-        
-        # Limites Geométricos do AG
-        self.P_MIN, self.P_MAX = 3.0, 14.0
-        self.H_MIN, self.H_MAX = 3.0, 14.0
-        self.W_MIN, self.W_MAX = 4.0, 14.0
-        
-        self.populacao = [self.gerar_cromossomo() for _ in range(self.tam_populacao)]
+        self.populacao = [self.gerar_individuo() for _ in range(self.tam_populacao)]
+        self.historico_fronteira = []
+        self.historico_melhor = []
 
-    def reparar_paineis(self, p):
-        """Garante que a soma dos painéis horizontais (vão livre) seja exatos 40 cm"""
-        p = np.clip(p, self.P_MIN, self.P_MAX)
-        diff = 40.0 - np.sum(p)
-        for _ in range(10):
-            if abs(diff) < 1e-9: break
-            p += diff / 4.0
-            p = np.clip(p, self.P_MIN, self.P_MAX)
-            diff = 40.0 - np.sum(p)
-        return p
-
-    def gerar_cromossomo(self):
-        p = self.reparar_paineis(np.random.uniform(self.P_MIN, self.P_MAX, 4))
+    def gerar_individuo(self):
+        """Gera uma estrutura cromossômica aleatória dentro do domínio válido."""
+        p = np.random.uniform(self.P_MIN, self.P_MAX, 4)
         h = np.random.uniform(self.H_MIN, self.H_MAX, 5)
         w = random.uniform(self.W_MIN, self.W_MAX)
-        n = np.random.randint(1, 4, 17) # 1, 2 ou 3 palitos por barra
-        return {'p': p, 'h': h, 'w': w, 'n': n, 'fitness': 0.0}
+        n = np.random.randint(1, 4, 17)
+        return Individuo(p, h, w, n)
 
-    def calcular_palitos_barra(self, L_cm, n_camadas):
-        """
-        Calcula palitos necessários descontando a sobreposição de 1 cm nas emendas.
-        """
-        if L_cm <= self.STICK_LENGTH_CM:
-            k_longitudinal = 1
-        else:
-            comprimento_util_extra = self.STICK_LENGTH_CM - self.SOBREPOSICAO_CM
-            k_longitudinal = math.ceil((L_cm - self.STICK_LENGTH_CM) / comprimento_util_extra) + 1
-            
-        return k_longitudinal * n_camadas
+    def calcular_fator_seguranca(self, tensao_atuante_pa, eh_tracao):
+        """Calcula o quão segura é a treliça para aguentar a tensão atual."""
+        if tensao_atuante_pa <= 1e-9:
+            return float('inf')
+        limite = self.SIGMA_T_YIELD if eh_tracao else self.SIGMA_C_YIELD
+        return limite / tensao_atuante_pa
 
-    def calcular_capacidade_barra(self, force_unit, n_camadas, length_m):
-        """Calcula a carga limite teórica considerando a orientação na VERTICAL e a colagem."""
-        # Seção composta (palitos colados funcionam como uma única viga)
-        espessura_total = n_camadas * self.T_SECTION
-        area = self.H_SECTION * espessura_total
-        
-        if force_unit > 0.0:
-            return self.SIGMA_T_ALLOW * area # Falha por Tração
-        
-        # Flambagem de Euler (Compressão)
-        # Como estão colados na vertical, a flambagem ocorrerá no eixo mais fraco (eixo Z, para o lado).
-        # A inércia de uma seção retangular é (base * altura^3) / 12
-        # Eixo fraco: base é 1.4 cm (H_SECTION), altura contra flambagem é a espessura total.
-        inercia_minima = (self.H_SECTION * (espessura_total ** 3)) / 12.0
-        
-        euler = (math.pi ** 2) * (self.E_GPa * 1e9) * inercia_minima / (length_m ** 2)
-        
-        return min(self.SIGMA_C_ALLOW * area, euler)
+    def calcular_capacidade_compressao(self, n_camadas, length_m):
+        """Calcula a resistência à flambagem de Euler para o eixo fraco na orientação vertical."""
+        base_m = n_camadas * self.T_SECTION_M
+        altura_m = self.H_SECTION_M
+        inercia_yy = (altura_m * (base_m ** 3)) / 12.0
+        inercia_xx = (base_m * (altura_m ** 3)) / 12.0
+        inercia_min = min(inercia_yy, inercia_xx)
+        forca_euler = (math.pi ** 2) * self.E_PA * inercia_min / (length_m ** 2)
+        area = base_m * altura_m
+        forca_esmagamento = self.SIGMA_C_YIELD * area
+        return min(forca_euler, forca_esmagamento) / area
 
-    def avaliar_fitness(self, ind):
-        ind['p'] = self.reparar_paineis(ind['p'])
-        nos, barras, comprimentos_m, angulos = self.utils.calcular_comprimentos_howe(ind['p'], ind['h'])
-        
-        axial_unit = self.utils.calcular_reacoes_e_forcas(nos, barras, angulos)
-        if axial_unit is None:
-            return 0.0 
-            
-        comprimentos_cm = np.array(comprimentos_m) * 100.0
-        comprimentos_fisicos_cm = comprimentos_cm.copy()
-        
-        # Adiciona a sobra de 1.5 cm nas barras extremas do banzo inferior
-        comprimentos_fisicos_cm[0] += 1.5
-        comprimentos_fisicos_cm[3] += 1.5
-        
-        total_palitos_portico = 0
+    def avaliar(self, ind):
+        """Executa a rotina de simulação, determinando a massa e as tensões, validando restrições."""
+        p_total = np.sum(ind.p)
+        if p_total == 0:
+            p_total = 1.0
+        ind.p = (ind.p / p_total) * 35.0
+        nos, barras, comprimentos_cm, angulos = self.utils.calcular_comprimentos_howe(ind.p, ind.h)
+        carga_por_portico = self.carga_projeto_kg / 2.0
+        esforcos_n = self.utils.calcular_reacoes_e_forcas(nos, barras, angulos, carga_por_portico)
+        comprimentos_fisicos_cm = np.array(comprimentos_cm, dtype=float).copy()
+        comprimentos_fisicos_cm[0] += 0.5
+        comprimentos_fisicos_cm[3] += 0.5
+        palitos_por_portico = 0
+        l_util = self.L_PALITO_CM - self.SOBREPOSICAO_CM
         for i in range(17):
-            n_camadas = ind['n'][i]
             L_cm = comprimentos_fisicos_cm[i]
-            total_palitos_portico += self.calcular_palitos_barra(L_cm, n_camadas)
-            
-        w_cm = ind['w']
-        palitos_por_travamento = self.calcular_palitos_barra(w_cm, 1)
-        total_palitos_travamentos = 10 * palitos_por_travamento
-        
-        total_palitos_3d = 2 * total_palitos_portico + total_palitos_travamentos
-        
-        vol_um_palito_m3 = (self.STICK_LENGTH_CM / 100.0) * self.H_SECTION * self.T_SECTION
-        massa_um_palito_kg = self.RHO * vol_um_palito_m3
-        massa_g = total_palitos_3d * massa_um_palito_kg * 1000.0
-        
-        if massa_g >= 600.0 or total_palitos_3d > 150:
-            return 0.001
+            if L_cm <= self.L_PALITO_CM:
+                k = 1
+            else:
+                k = math.ceil((L_cm - self.L_PALITO_CM) / l_util) + 1
+            palitos_por_portico += k * ind.n[i]
+        palitos_travamento = 1 if ind.w <= self.L_PALITO_CM else math.ceil((ind.w - self.L_PALITO_CM) / l_util) + 1
+        total_travamentos = 10 * palitos_travamento
+        total_palitos = 2 * palitos_por_portico + total_travamentos
+        vol_palito = (self.L_PALITO_CM / 100.0) * self.H_SECTION_M * self.T_SECTION_M
+        massa_g = total_palitos * (self.RHO * vol_palito) * 1000.0
+        ind.massa_g = massa_g
+        ind.dados_extras = {
+            'comprimentos_cm': comprimentos_fisicos_cm,
+            'total_palitos': total_palitos,
+            'esforcos_n': esforcos_n
+        }
+        if massa_g >= 600.0 or total_palitos > 150:
+            ind.valido = False
+            ind.massa_g = massa_g + 10000.0
+            ind.tensao_max_mpa = 10000.0
+            ind.fator_seguranca = 0.0
+            return
+        piores_tensoes = []
+        fs_minimo = float('inf')
+        for i, forca in enumerate(esforcos_n):
+            area = ind.n[i] * self.T_SECTION_M * self.H_SECTION_M
+            tensao_pa = abs(forca) / area
+            comprimento_m = comprimentos_cm[i] / 100.0
+            if forca > 1e-9:
+                piores_tensoes.append(tensao_pa)
+                fs = self.calcular_fator_seguranca(tensao_pa, True)
+            elif forca < -1e-9:
+                limite_comp_pa = self.calcular_capacidade_compressao(ind.n[i], comprimento_m)
+                tensao_efetiva_pa = tensao_pa * (self.SIGMA_C_YIELD / limite_comp_pa)
+                piores_tensoes.append(tensao_efetiva_pa)
+                fs = limite_comp_pa / tensao_pa if tensao_pa > 0 else float('inf')
+            else:
+                piores_tensoes.append(0.0)
+                fs = float('inf')
+            if fs < fs_minimo:
+                fs_minimo = fs
+        ind.tensao_max_mpa = max(piores_tensoes) / 1e6
+        ind.fator_seguranca = fs_minimo
+        ind.valido = (fs_minimo >= 1.0)
+        if not ind.valido:
+            ind.tensao_max_mpa += 1000.0
 
-        rupturas = []
-        for i, coeff in enumerate(axial_unit):
-            if abs(coeff) > 1e-9:
-                capacidade = self.calcular_capacidade_barra(coeff, ind['n'][i], comprimentos_m[i])
-                rupturas.append(capacidade / abs(coeff))
-                
-        carga_max_portico = min(rupturas)
-        carga_max_3d_kg = (2.0 * carga_max_portico) / 9.81
-        
-        ind['fitness'] = carga_max_3d_kg / massa_g
-        ind['carga_kg'] = carga_max_3d_kg
-        ind['massa_g'] = massa_g
-        ind['palitos_total'] = total_palitos_3d
-        return ind['fitness']
+    def classificar_pareto(self, populacao):
+        """Aplica o processo de ordenação não-dominada do NSGA-II."""
+        fronteiras = [[]]
+        for p in populacao:
+            p.dominados = []
+            p.num_dominantes = 0
+            for q in populacao:
+                condicao_dominacao = (p.massa_g <= q.massa_g and p.tensao_max_mpa <= q.tensao_max_mpa) and \
+                                     (p.massa_g < q.massa_g or p.tensao_max_mpa < q.tensao_max_mpa)
+                condicao_dominada = (q.massa_g <= p.massa_g and q.tensao_max_mpa <= p.tensao_max_mpa) and \
+                                    (q.massa_g < p.massa_g or q.tensao_max_mpa < p.tensao_max_mpa)
+                if condicao_dominacao:
+                    p.dominados.append(q)
+                elif condicao_dominada:
+                    p.num_dominantes += 1
+            if p.num_dominantes == 0:
+                p.rank = 0
+                fronteiras[0].append(p)
+        i = 0
+        while len(fronteiras[i]) > 0:
+            proxima_fronteira = []
+            for p in fronteiras[i]:
+                for q in p.dominados:
+                    q.num_dominantes -= 1
+                    if q.num_dominantes == 0:
+                        q.rank = i + 1
+                        proxima_fronteira.append(q)
+            i += 1
+            fronteiras.append(proxima_fronteira)
+        return fronteiras[:-1]
 
-    def cruzar(self, p1, p2):
-        c1, c2 = self.gerar_cromossomo(), self.gerar_cromossomo()
+    def cruzar_e_mutar(self, p1, p2):
+        """Aplica crossover BLX-alpha contínuo e uniforme discreto, seguido de mutação gaussiana."""
         alpha = 0.35
-        c1['p'] = self.reparar_paineis(p1['p'] * alpha + p2['p'] * (1 - alpha))
-        c2['p'] = self.reparar_paineis(p2['p'] * alpha + p1['p'] * (1 - alpha))
-        c1['h'] = p1['h'] * alpha + p2['h'] * (1 - alpha)
-        c2['h'] = p2['h'] * alpha + p1['h'] * (1 - alpha)
-        c1['w'] = (p1['w'] + p2['w']) / 2.0
-        c2['w'] = (p1['w'] + p2['w']) / 2.0
-        
+        c1_p = p1.p * alpha + p2.p * (1 - alpha)
+        c2_p = p2.p * alpha + p1.p * (1 - alpha)
+        c1_h = p1.h * alpha + p2.h * (1 - alpha)
+        c2_h = p2.h * alpha + p1.h * (1 - alpha)
+        c1_w, c2_w = p1.w, p2.w
         mask = np.random.rand(17) > 0.5
-        c1['n'] = np.where(mask, p1['n'], p2['n'])
-        c2['n'] = np.where(mask, p2['n'], p1['n'])
-        return c1, c2
+        c1_n = np.where(mask, p1.n, p2.n)
+        c2_n = np.where(mask, p2.n, p1.n)
+        filhos = [Individuo(c1_p, c1_h, c1_w, c1_n), Individuo(c2_p, c2_h, c2_w, c2_n)]
+        for f in filhos:
+            if random.random() < 0.2:
+                f.p += np.random.normal(0, 0.5, 4)
+                f.h += np.random.normal(0, 0.5, 5)
+                f.w += np.random.normal(0, 0.4)
+            for j in range(17):
+                if random.random() < 0.1:
+                    f.n[j] = random.choice([1, 2, 3])
+            f.p = np.clip(f.p, self.P_MIN, self.P_MAX)
+            f.h = np.clip(f.h, self.H_MIN, self.H_MAX)
+            f.w = np.clip(f.w, self.W_MIN, self.W_MAX)
+        return filhos[0], filhos[1]
 
     def iniciar(self):
+        """Laço principal evolutivo gerenciando as gerações da Fronteira Pareto."""
+        for ind in self.populacao:
+            self.avaliar(ind)
         for gen in range(self.num_geracoes):
-            for ind in self.populacao:
-                self.avaliar_fitness(ind)
+            nova_populacao = []
+            while len(nova_populacao) < self.tam_populacao:
+                p1, p2 = random.sample(self.populacao, 2)
+                f1, f2 = self.cruzar_e_mutar(p1, p2)
+                self.avaliar(f1)
+                self.avaliar(f2)
+                nova_populacao.extend([f1, f2])
+            populacao_combinada = self.populacao + nova_populacao
+            fronteiras = self.classificar_pareto(populacao_combinada)
+            self.populacao = []
+            para_proxima = self.tam_populacao
+            for front in fronteiras:
+                if len(front) <= para_proxima:
+                    self.populacao.extend(front)
+                    para_proxima -= len(front)
+                else:
+                    front_ordenada = sorted(front, key=lambda x: x.massa_g)
+                    self.populacao.extend(front_ordenada[:para_proxima])
+                    break
+            front_atual = [[p.massa_g, p.tensao_max_mpa] for p in fronteiras[0] if p.valido]
+            self.historico_fronteira.append(front_atual)
+            
+            validos = [p for p in self.populacao if p.valido]
+            front_zero_validos = [p for p in fronteiras[0] if p.valido]
+            
+            # --- LÓGICA DO COTOVELO (KNEE POINT) ---
+            if front_zero_validos:
+                # 1. Encontra os extremos da fronteira para normalização
+                min_massa = min(p.massa_g for p in front_zero_validos)
+                max_massa = max(p.massa_g for p in front_zero_validos)
+                min_tensao = min(p.tensao_max_mpa for p in front_zero_validos)
+                max_tensao = max(p.tensao_max_mpa for p in front_zero_validos)
+
+                # 2. Calcula a distância normalizada até o Ponto Ideal (Mínima Massa, Mínima Tensão)
+                def dist_ideal(ind):
+                    nm = (ind.massa_g - min_massa) / (max_massa - min_massa) if max_massa > min_massa else 0.0
+                    nt = (ind.tensao_max_mpa - min_tensao) / (max_tensao - min_tensao) if max_tensao > min_tensao else 0.0
+                    return (nm ** 2) + (nt ** 2)
+
+                # 3. O melhor indivíduo é o que tem a menor distância (o cotovelo da curva)
+                melhor_fator = min(front_zero_validos, key=dist_ideal)
                 
-            self.populacao.sort(key=lambda x: x['fitness'], reverse=True)
+            elif validos:
+                # Fallback caso não haja válidos na primeira fronteira
+                melhor_fator = max(validos, key=lambda x: (x.fator_seguranca * self.carga_projeto_kg) / x.massa_g)
+            else:
+                # Fallback se não houver treliças válidas (escolhe a menos pior)
+                melhor_fator = min(self.populacao, key=lambda x: x.massa_g * x.tensao_max_mpa)
+                
+            self.historico_melhor.append(melhor_fator)
             
-            nova_geracao = self.populacao[:20] 
-            while len(nova_geracao) < self.tam_populacao:
-                p1, p2 = random.sample(self.populacao[:50], 2)
-                f1, f2 = self.cruzar(p1, p2)
-                nova_geracao.extend([f1, f2])
-            
-            self.populacao = nova_geracao[:self.tam_populacao]
-            
-        return self.populacao[0]
+        return self.historico_melhor[-1], self.historico_fronteira, self.historico_melhor
