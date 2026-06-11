@@ -1,15 +1,8 @@
 import numpy as np
 
 class Utils:
-    """Fornece as ferramentas matemáticas e físicas para a avaliação da treliça Howe."""
-
     def calcular_comprimentos_howe(self, p, h):
-        """Calcula a conectividade, coordenadas, comprimentos e ângulos da treliça Howe."""
-        p_total = np.sum(p)
-        if p_total == 0:
-            p_total = 1.0
-        p_norm = (p / p_total) * 35.0
-        x = [0.0, p_norm[0], p_norm[0] + p_norm[1], p_norm[0] + p_norm[1] + p_norm[2], 35.0]
+        x = [0.0, p[0], p[0] + p[1], p[0] + p[1] + p[2], np.sum(p)]
         nos = np.array([
             [x[0], 0.0], [x[1], 0.0], [x[2], 0.0], [x[3], 0.0], [x[4], 0.0],
             [x[0], h[0]], [x[1], h[1]], [x[2], h[2]], [x[3], h[3]], [x[4], h[4]]
@@ -27,11 +20,10 @@ class Utils:
             dy = nos[j][1] - nos[i][1]
             L = np.sqrt(dx**2 + dy**2)
             comprimentos.append(L)
-            angulos.append((dx / L, dy / L))
+            angulos.append((dx / L, dy / L) if L > 0 else (0,0))
         return nos, barras, comprimentos, angulos
 
     def calcular_reacoes_e_forcas(self, nos, barras, angulos, carga_kg):
-        """Avalia os esforços axiais reais nas barras usando o método dos nós e álgebra linear."""
         num_nos = len(nos)
         num_barras = len(barras)
         num_reacoes = 3

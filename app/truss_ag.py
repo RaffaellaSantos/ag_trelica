@@ -4,17 +4,17 @@ import math
 from app.utils import Utils
 
 class Individuo:
-    """Estrutura de dados que armazena as características genéticas e físicas da treliça."""
-
     def __init__(self, p, h, w, n):
-        """Inicializa os genes e os parâmetros multiobjetivo."""
         self.p = p
         self.h = h
         self.w = w
         self.n = n
         self.massa_g = float('inf')
         self.tensao_max_mpa = float('inf')
+        self.inv_tensao = 0.0
         self.fator_seguranca = 0.0
+        self.eficiencia = 0.0  # Nova métrica baseada no PDF: Carga Ruptura / Massa
+        self.violacao = 0.0
         self.valido = False
         self.rank = -1
         self.distancia_aglomeracao = 0.0
@@ -23,52 +23,53 @@ class Individuo:
         self.dados_extras = {}
 
 class TrussAG:
-    """Implementa o Algoritmo Genético Multiobjetivo (Fronteira de Pareto) para Treliças 3D."""
-
     def __init__(self, tam_populacao=150, num_geracoes=150, carga_projeto_kg=15.0):
-        """Configura as propriedades físicas, penalidades e limiares do algoritmo."""
         self.tam_populacao = tam_populacao
         self.num_geracoes = num_geracoes
         self.carga_projeto_kg = carga_projeto_kg
         self.utils = Utils()
-        
-        # --- ATUALIZADO CONFORME PDF DA ATIVIDADE 9 ---
-        self.L_PALITO_CM = 11.4       # Comprimento do palito 
-        self.H_SECTION_M = 0.010      # Largura do palito (1,0 cm) 
-        self.T_SECTION_M = 0.002      # Espessura do palito (0,2 cm) 
-        self.SOBREPOSICAO_CM = 1.0    
+        self.L_PALITO_CM = 14.8
+        self.H_SECTION_M = 0.0135
+        self.T_SECTION_M = 0.0017
+        self.SOBREPOSICAO_CM = 4.0
         self.RHO = 510.0
         self.E_PA = 3.5e9
         self.SIGMA_T_YIELD = 55e6
         self.SIGMA_C_YIELD = 35e6
-        
-        # Limites contínuos atualizados para o máximo de 11,4 cm 
-        self.P_MIN, self.P_MAX = 3.0, 11.4
-        self.H_MIN, self.H_MAX = 3.0, 11.4
-        self.W_MIN, self.W_MAX = 4.0, 11.4
-        # ----------------------------------------------
-        
+        self.P_MIN, self.P_MAX = 10.75, 12.75
+        self.H_MIN, self.H_MAX = 3.0, 14.8
+        self.W_MIN, self.W_MAX = 4.0, 14.8
         self.populacao = [self.gerar_individuo() for _ in range(self.tam_populacao)]
         self.historico_fronteira = []
         self.historico_melhor = []
+        self.historico_populacao = []
+        self.arquivo_pareto_global = []
+        self.melhor_global = None  # Variável para rastrear o Campeão Absoluto
+
+    def impor_simetria(self, p, h, n):
+        p[3], p[2] = p[0], p[1]
+        h[4], h[3] = h[0], h[1]
+        n[3], n[2] = n[0], n[1]
+        n[7], n[6] = n[4], n[5]
+        n[12], n[11] = n[8], n[9]
+        n[16], n[15] = n[13], n[14]
+        return p, h, n
 
     def gerar_individuo(self):
-        """Gera uma estrutura cromossômica aleatória dentro do domínio válido."""
         p = np.random.uniform(self.P_MIN, self.P_MAX, 4)
         h = np.random.uniform(self.H_MIN, self.H_MAX, 5)
         w = random.uniform(self.W_MIN, self.W_MAX)
-        n = np.random.randint(1, 4, 17)
+        n = np.random.randint(1, 3, 17)
+        p, h, n = self.impor_simetria(p, h, n)
         return Individuo(p, h, w, n)
 
     def calcular_fator_seguranca(self, tensao_atuante_pa, eh_tracao):
-        """Calcula o quão segura é a treliça para aguentar a tensão atual."""
         if tensao_atuante_pa <= 1e-9:
             return float('inf')
         limite = self.SIGMA_T_YIELD if eh_tracao else self.SIGMA_C_YIELD
         return limite / tensao_atuante_pa
 
     def calcular_capacidade_compressao(self, n_camadas, length_m):
-        """Calcula a resistência à flambagem de Euler para o eixo fraco na orientação vertical."""
         base_m = n_camadas * self.T_SECTION_M
         altura_m = self.H_SECTION_M
         inercia_yy = (altura_m * (base_m ** 3)) / 12.0
@@ -80,43 +81,68 @@ class TrussAG:
         return min(forca_euler, forca_esmagamento) / area
 
     def avaliar(self, ind):
-        """Executa a rotina de simulação, determinando a massa e as tensões, validando restrições."""
-        p_total = np.sum(ind.p)
-        if p_total == 0:
-            p_total = 1.0
-        ind.p = (ind.p / p_total) * 35.0
         nos, barras, comprimentos_cm, angulos = self.utils.calcular_comprimentos_howe(ind.p, ind.h)
         carga_por_portico = self.carga_projeto_kg / 2.0
         esforcos_n = self.utils.calcular_reacoes_e_forcas(nos, barras, angulos, carga_por_portico)
+        esforcos_virtuais = self.utils.calcular_reacoes_e_forcas(nos, barras, angulos, 1.0 / 9.81)
+        
+        if np.all(esforcos_n == 0) or np.isnan(esforcos_n).any():
+            ind.violacao = 10000.0
+            ind.massa_g = 10000.0
+            ind.tensao_max_mpa = 9999.0
+            ind.inv_tensao = 0.0
+            ind.eficiencia = 0.0
+            ind.valido = False
+            return
+
         comprimentos_fisicos_cm = np.array(comprimentos_cm, dtype=float).copy()
         comprimentos_fisicos_cm[0] += 0.5
         comprimentos_fisicos_cm[3] += 0.5
-        palitos_por_portico = 0
-        l_util = self.L_PALITO_CM - self.SOBREPOSICAO_CM
+        
+        l_util = self.L_PALITO_CM - 2 * self.SOBREPOSICAO_CM
+        if l_util <= 0:
+            l_util = 1.0
+            
+        massa_linear_g_cm = self.RHO * self.H_SECTION_M * self.T_SECTION_M * 10.0
+        
+        massa_g = 0.0
+        total_palitos = 0
+        deslocamento_m = 0.0
+        
         for i in range(17):
             L_cm = comprimentos_fisicos_cm[i]
+            
+            A_m2 = ind.n[i] * self.T_SECTION_M * self.H_SECTION_M
+            L_m = comprimentos_cm[i] / 100.0
+            deslocamento_m += (esforcos_n[i] * esforcos_virtuais[i] * L_m) / (self.E_PA * A_m2)
+            
+            massa_g += 2 * (L_cm * ind.n[i] * massa_linear_g_cm)
+            
             if L_cm <= self.L_PALITO_CM:
                 k = 1
             else:
                 k = math.ceil((L_cm - self.L_PALITO_CM) / l_util) + 1
-            palitos_por_portico += k * ind.n[i]
-        palitos_travamento = 1 if ind.w <= self.L_PALITO_CM else math.ceil((ind.w - self.L_PALITO_CM) / l_util) + 1
-        total_travamentos = 10 * palitos_travamento
-        total_palitos = 2 * palitos_por_portico + total_travamentos
-        vol_palito = (self.L_PALITO_CM / 100.0) * self.H_SECTION_M * self.T_SECTION_M
-        massa_g = total_palitos * (self.RHO * vol_palito) * 1000.0
+                massa_g += 2 * ((k - 1) * self.SOBREPOSICAO_CM * ind.n[i] * massa_linear_g_cm)
+                
+            total_palitos += 2 * (k * ind.n[i])
+            
+        massa_g += 10 * (ind.w * massa_linear_g_cm)
+        palitos_travamento = 1
+        if ind.w > self.L_PALITO_CM:
+            k_w = math.ceil((ind.w - self.L_PALITO_CM) / l_util) + 1
+            palitos_travamento = k_w
+            massa_g += 10 * ((k_w - 1) * self.SOBREPOSICAO_CM * massa_linear_g_cm)
+            
+        total_palitos += 10 * palitos_travamento
+        
         ind.massa_g = massa_g
         ind.dados_extras = {
             'comprimentos_cm': comprimentos_fisicos_cm,
             'total_palitos': total_palitos,
-            'esforcos_n': esforcos_n
+            'esforcos_n': esforcos_n,
+            'deslocamento_mm': deslocamento_m * 1000.0
         }
-        if massa_g >= 600.0 or total_palitos > 150:
-            ind.valido = False
-            ind.massa_g = massa_g + 10000.0
-            ind.tensao_max_mpa = 10000.0
-            ind.fator_seguranca = 0.0
-            return
+
         piores_tensoes = []
         fs_minimo = float('inf')
         for i, forca in enumerate(esforcos_n):
@@ -128,7 +154,7 @@ class TrussAG:
                 fs = self.calcular_fator_seguranca(tensao_pa, True)
             elif forca < -1e-9:
                 limite_comp_pa = self.calcular_capacidade_compressao(ind.n[i], comprimento_m)
-                tensao_efetiva_pa = tensao_pa * (self.SIGMA_C_YIELD / limite_comp_pa)
+                tensao_efetiva_pa = tensao_pa * (self.SIGMA_C_YIELD / limite_comp_pa) if limite_comp_pa > 0 else tensao_pa * 1e3
                 piores_tensoes.append(tensao_efetiva_pa)
                 fs = limite_comp_pa / tensao_pa if tensao_pa > 0 else float('inf')
             else:
@@ -136,30 +162,79 @@ class TrussAG:
                 fs = float('inf')
             if fs < fs_minimo:
                 fs_minimo = fs
-        ind.tensao_max_mpa = max(piores_tensoes) / 1e6
+                
+        ind.tensao_max_mpa = (max(piores_tensoes) / 1e6) if piores_tensoes else float('inf')
+        if ind.tensao_max_mpa > 1e-6 and ind.tensao_max_mpa != float('inf'):
+            ind.inv_tensao = 1.0 / ind.tensao_max_mpa
+        else:
+            ind.inv_tensao = 0.0
+
         ind.fator_seguranca = fs_minimo
-        ind.valido = (fs_minimo >= 1.0)
-        if not ind.valido:
-            ind.tensao_max_mpa += 1000.0
+
+        v = 0.0
+        if massa_g > 100.0:
+            v += (massa_g - 100.0) * 100.0
+            
+        p_total = np.sum(ind.p)
+        if p_total < 43.0:
+            v += (43.0 - p_total) * 50.0
+        if p_total > 51.0:
+            v += (p_total - 51.0) * 50.0
+            
+        if any(ind.n[i] == 1 for i in range(4)):
+            v += 200.0
+            
+        if fs_minimo < 1.0:
+            v += (1.0 - fs_minimo) * 1000.0
+            
+        if fs_minimo > 1.5 and massa_g > 100.0:
+            v += (fs_minimo - 1.0) * 100.0
+            
+        if total_palitos > 150:
+            v += (total_palitos - 150) * 10.0
+            
+        ind.violacao = v
+        ind.valido = (v == 0.0)
+        
+        # Atribui a eficiência (Fitness Real) se for válida
+        if ind.valido:
+            ind.eficiencia = (ind.fator_seguranca * self.carga_projeto_kg) / ind.massa_g
+        else:
+            ind.eficiencia = 0.0
 
     def classificar_pareto(self, populacao):
-        """Aplica o processo de ordenação não-dominada do NSGA-II."""
         fronteiras = [[]]
         for p in populacao:
             p.dominados = []
             p.num_dominantes = 0
             for q in populacao:
-                condicao_dominacao = (p.massa_g <= q.massa_g and p.tensao_max_mpa <= q.tensao_max_mpa) and \
-                                     (p.massa_g < q.massa_g or p.tensao_max_mpa < q.tensao_max_mpa)
-                condicao_dominada = (q.massa_g <= p.massa_g and q.tensao_max_mpa <= p.tensao_max_mpa) and \
-                                    (q.massa_g < p.massa_g or q.tensao_max_mpa < p.tensao_max_mpa)
-                if condicao_dominacao:
+                dominates_q = False
+                if p.violacao < q.violacao:
+                    dominates_q = True
+                elif p.violacao == q.violacao:
+                    p_melhor_ou_igual = (p.massa_g <= q.massa_g and p.inv_tensao >= q.inv_tensao)
+                    p_estritamente_melhor = (p.massa_g < q.massa_g or p.inv_tensao > q.inv_tensao)
+                    if p_melhor_ou_igual and p_estritamente_melhor:
+                        dominates_q = True
+
+                q_dominates_p = False
+                if q.violacao < p.violacao:
+                    q_dominates_p = True
+                elif q.violacao == p.violacao:
+                    q_melhor_ou_igual = (q.massa_g <= p.massa_g and q.inv_tensao >= p.inv_tensao)
+                    q_estritamente_melhor = (q.massa_g < p.massa_g or q.inv_tensao > p.inv_tensao)
+                    if q_melhor_ou_igual and q_estritamente_melhor:
+                        q_dominates_p = True
+
+                if dominates_q:
                     p.dominados.append(q)
-                elif condicao_dominada:
+                elif q_dominates_p:
                     p.num_dominantes += 1
+                    
             if p.num_dominantes == 0:
                 p.rank = 0
                 fronteiras[0].append(p)
+                
         i = 0
         while len(fronteiras[i]) > 0:
             proxima_fronteira = []
@@ -173,8 +248,29 @@ class TrussAG:
             fronteiras.append(proxima_fronteira)
         return fronteiras[:-1]
 
+    def calcular_crowding_distance(self, front):
+        l = len(front)
+        if l == 0: return
+        for p in front:
+            p.distancia_aglomeracao = 0.0
+            
+        front.sort(key=lambda x: x.massa_g)
+        front[0].distancia_aglomeracao = float('inf')
+        front[-1].distancia_aglomeracao = float('inf')
+        m_min, m_max = front[0].massa_g, front[-1].massa_g
+        if m_max > m_min:
+            for i in range(1, l - 1):
+                front[i].distancia_aglomeracao += (front[i+1].massa_g - front[i-1].massa_g) / (m_max - m_min)
+                
+        front.sort(key=lambda x: x.inv_tensao)
+        front[0].distancia_aglomeracao = float('inf')
+        front[-1].distancia_aglomeracao = float('inf')
+        t_min, t_max = front[0].inv_tensao, front[-1].inv_tensao
+        if t_max > t_min:
+            for i in range(1, l - 1):
+                front[i].distancia_aglomeracao += (front[i+1].inv_tensao - front[i-1].inv_tensao) / (t_max - t_min)
+
     def cruzar_e_mutar(self, p1, p2):
-        """Aplica crossover BLX-alpha contínuo e uniforme discreto, seguido de mutação gaussiana."""
         alpha = 0.35
         c1_p = p1.p * alpha + p2.p * (1 - alpha)
         c2_p = p2.p * alpha + p1.p * (1 - alpha)
@@ -185,6 +281,7 @@ class TrussAG:
         c1_n = np.where(mask, p1.n, p2.n)
         c2_n = np.where(mask, p2.n, p1.n)
         filhos = [Individuo(c1_p, c1_h, c1_w, c1_n), Individuo(c2_p, c2_h, c2_w, c2_n)]
+        
         for f in filhos:
             if random.random() < 0.2:
                 f.p += np.random.normal(0, 0.5, 4)
@@ -193,15 +290,18 @@ class TrussAG:
             for j in range(17):
                 if random.random() < 0.1:
                     f.n[j] = random.choice([1, 2, 3])
+                    
             f.p = np.clip(f.p, self.P_MIN, self.P_MAX)
             f.h = np.clip(f.h, self.H_MIN, self.H_MAX)
             f.w = np.clip(f.w, self.W_MIN, self.W_MAX)
+            f.p, f.h, f.n = self.impor_simetria(f.p, f.h, f.n)
+            
         return filhos[0], filhos[1]
 
     def iniciar(self):
-        """Laço principal evolutivo gerenciando as gerações da Fronteira Pareto."""
         for ind in self.populacao:
             self.avaliar(ind)
+            
         for gen in range(self.num_geracoes):
             nova_populacao = []
             while len(nova_populacao) < self.tam_populacao:
@@ -210,48 +310,47 @@ class TrussAG:
                 self.avaliar(f1)
                 self.avaliar(f2)
                 nova_populacao.extend([f1, f2])
+                
             populacao_combinada = self.populacao + nova_populacao
             fronteiras = self.classificar_pareto(populacao_combinada)
             self.populacao = []
             para_proxima = self.tam_populacao
+            
             for front in fronteiras:
+                self.calcular_crowding_distance(front)
                 if len(front) <= para_proxima:
                     self.populacao.extend(front)
                     para_proxima -= len(front)
                 else:
-                    front_ordenada = sorted(front, key=lambda x: x.massa_g)
-                    self.populacao.extend(front_ordenada[:para_proxima])
+                    front.sort(key=lambda x: (-x.distancia_aglomeracao))
+                    self.populacao.extend(front[:para_proxima])
                     break
-            front_atual = [[p.massa_g, p.tensao_max_mpa] for p in fronteiras[0] if p.valido]
+                    
+            candidatos_globais = self.arquivo_pareto_global + self.populacao
+            fronts_globais = self.classificar_pareto(candidatos_globais)
+            self.calcular_crowding_distance(fronts_globais[0])
+            fronts_globais[0].sort(key=lambda x: (-x.distancia_aglomeracao))
+            
+            self.arquivo_pareto_global = [p for p in fronts_globais[0] if p.valido][:150]
+                    
+            front_atual = [[p.massa_g, p.inv_tensao] for p in self.arquivo_pareto_global]
+            pop_atual = [[p.massa_g, p.inv_tensao] for p in self.populacao if p.massa_g < 1000]
+            
             self.historico_fronteira.append(front_atual)
+            self.historico_populacao.append(pop_atual)
             
-            validos = [p for p in self.populacao if p.valido]
-            front_zero_validos = [p for p in fronteiras[0] if p.valido]
-            
-            # --- LÓGICA DO COTOVELO (KNEE POINT) ---
-            if front_zero_validos:
-                # 1. Encontra os extremos da fronteira para normalização
-                min_massa = min(p.massa_g for p in front_zero_validos)
-                max_massa = max(p.massa_g for p in front_zero_validos)
-                min_tensao = min(p.tensao_max_mpa for p in front_zero_validos)
-                max_tensao = max(p.tensao_max_mpa for p in front_zero_validos)
-
-                # 2. Calcula a distância normalizada até o Ponto Ideal (Mínima Massa, Mínima Tensão)
-                def dist_ideal(ind):
-                    nm = (ind.massa_g - min_massa) / (max_massa - min_massa) if max_massa > min_massa else 0.0
-                    nt = (ind.tensao_max_mpa - min_tensao) / (max_tensao - min_tensao) if max_tensao > min_tensao else 0.0
-                    return (nm ** 2) + (nt ** 2)
-
-                # 3. O melhor indivíduo é o que tem a menor distância (o cotovelo da curva)
-                melhor_fator = min(front_zero_validos, key=dist_ideal)
-                
-            elif validos:
-                # Fallback caso não haja válidos na primeira fronteira
-                melhor_fator = max(validos, key=lambda x: (x.fator_seguranca * self.carga_projeto_kg) / x.massa_g)
+            # --- ATUALIZAÇÃO DO CAMPEÃO GLOBAL ABSOLUTO ---
+            if self.arquivo_pareto_global:
+                # Se existe treliça válida, procura a maior Eficiência Estrutural de todos os tempos
+                melhor_da_geracao = max(self.arquivo_pareto_global, key=lambda x: x.eficiencia)
+                if self.melhor_global is None or melhor_da_geracao.eficiencia > self.melhor_global.eficiencia:
+                    self.melhor_global = melhor_da_geracao
             else:
-                # Fallback se não houver treliças válidas (escolhe a menos pior)
-                melhor_fator = min(self.populacao, key=lambda x: x.massa_g * x.tensao_max_mpa)
+                # Se ainda não houver nenhuma ponte viável, guarda a "menos pior" (menor violação de regra)
+                melhor_da_geracao = min(self.populacao, key=lambda x: x.violacao)
+                if self.melhor_global is None or melhor_da_geracao.violacao < self.melhor_global.violacao:
+                    self.melhor_global = melhor_da_geracao
                 
-            self.historico_melhor.append(melhor_fator)
+            self.historico_melhor.append(self.melhor_global)
             
-        return self.historico_melhor[-1], self.historico_fronteira, self.historico_melhor
+        return self.historico_melhor[-1], self.historico_fronteira, self.historico_melhor, self.historico_populacao
