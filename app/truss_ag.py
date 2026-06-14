@@ -28,7 +28,7 @@ class TrussAG:
         self.num_geracoes = num_geracoes
         self.carga_projeto_kg = carga_projeto_kg
         self.utils = Utils()
-        self.L_PALITO_CM = 14.8
+        self.L_PALITO_CM = 14.0
         self.H_SECTION_M = 0.0135
         self.T_SECTION_M = 0.0017
         self.SOBREPOSICAO_CM = 4.0
@@ -36,9 +36,11 @@ class TrussAG:
         self.E_PA = 3.5e9
         self.SIGMA_T_YIELD = 55e6
         self.SIGMA_C_YIELD = 35e6
-        self.P_MIN, self.P_MAX = 10.75, 12.75
-        self.H_MIN, self.H_MAX = 3.0, 14.8
-        self.W_MIN, self.W_MAX = 4.0, 14.8
+        self.P0_MIN, self.P0_MAX = 10.0, 12.0  # painéis externos AB e DE: corte = p + 2 ≤ 14
+        self.P1_MIN, self.P1_MAX = 7.0, 10.0   # painéis internos BC e CD: corte = p + 4 ≤ 14
+        self.H_MIN, self.H_MAX = 3.0, 7.8
+        self.W_MIN, self.W_MAX = 7.0, 14.0
+        self.Sg = 2.5  # fator de calibração: reduz Euler para imperfeições reais (coluna real vs ideal)
         self.populacao = [self.gerar_individuo() for _ in range(self.tam_populacao)]
         self.historico_fronteira = []
         self.historico_melhor = []
@@ -56,7 +58,12 @@ class TrussAG:
         return p, h, n
 
     def gerar_individuo(self):
-        p = np.random.uniform(self.P_MIN, self.P_MAX, 4)
+        p = np.array([
+            random.uniform(self.P0_MIN, self.P0_MAX),
+            random.uniform(self.P1_MIN, self.P1_MAX),
+            random.uniform(self.P1_MIN, self.P1_MAX),
+            random.uniform(self.P0_MIN, self.P0_MAX),
+        ])
         h = np.random.uniform(self.H_MIN, self.H_MAX, 5)
         w = random.uniform(self.W_MIN, self.W_MAX)
         n = np.random.randint(1, 3, 17)
@@ -69,16 +76,27 @@ class TrussAG:
         limite = self.SIGMA_T_YIELD if eh_tracao else self.SIGMA_C_YIELD
         return limite / tensao_atuante_pa
 
-    def calcular_capacidade_compressao(self, n_camadas, length_m):
+    def calcular_capacidade_compressao(self, n_camadas, length_m, length_lat_m=None):
         base_m = n_camadas * self.T_SECTION_M
         altura_m = self.H_SECTION_M
-        inercia_yy = (altura_m * (base_m ** 3)) / 12.0
-        inercia_xx = (base_m * (altura_m ** 3)) / 12.0
-        inercia_min = min(inercia_yy, inercia_xx)
-        forca_euler = (math.pi ** 2) * self.E_PA * inercia_min / (length_m ** 2)
+        inercia_yy = (altura_m * (base_m ** 3)) / 12.0  # eixo lateral (fraco)
+        inercia_xx = (base_m * (altura_m ** 3)) / 12.0  # eixo no plano (forte)
         area = base_m * altura_m
+
+        # Flambagem no plano (usa I_min)
+        I_min = min(inercia_yy, inercia_xx)
+        euler_ip = (math.pi ** 2) * self.E_PA * I_min / (length_m ** 2)
+
+        # Flambagem lateral (banzo superior): comprimento efetivo = w
+        if length_lat_m is not None:
+            euler_op = (math.pi ** 2) * self.E_PA * inercia_yy / (length_lat_m ** 2)
+            forca_euler = min(euler_ip, euler_op)
+        else:
+            forca_euler = euler_ip
+
+        # Sg reduz Euler para compensar imperfeições reais (coluna ideal vs real)
         forca_esmagamento = self.SIGMA_C_YIELD * area
-        return min(forca_euler, forca_esmagamento) / area
+        return min(forca_euler / self.Sg, forca_esmagamento) / area
 
     def avaliar(self, ind):
         nos, barras, comprimentos_cm, angulos = self.utils.calcular_comprimentos_howe(ind.p, ind.h)
@@ -95,9 +113,14 @@ class TrussAG:
             ind.valido = False
             return
 
-        comprimentos_fisicos_cm = np.array(comprimentos_cm, dtype=float).copy()
-        comprimentos_fisicos_cm[0] += 0.5
-        comprimentos_fisicos_cm[3] += 0.5
+        comprimentos_geometricos_cm = np.array(comprimentos_cm, dtype=float).copy()
+        comprimentos_fisicos_cm = comprimentos_geometricos_cm.copy()
+        # apoios A=0 e E=4 não têm junta interna — só os demais nós somam meia sobreposição
+        nos_apoio = {0, 4}
+        meia_sob = self.SOBREPOSICAO_CM / 2  # 2 cm por extremidade interna
+        for i, (ni, nj) in enumerate(barras):
+            n_juntas = (0 if ni in nos_apoio else 1) + (0 if nj in nos_apoio else 1)
+            comprimentos_fisicos_cm[i] += n_juntas * meia_sob
         
         l_util = self.L_PALITO_CM - 2 * self.SOBREPOSICAO_CM
         if l_util <= 0:
@@ -137,6 +160,7 @@ class TrussAG:
         
         ind.massa_g = massa_g
         ind.dados_extras = {
+            'comprimentos_geometricos_cm': comprimentos_geometricos_cm,
             'comprimentos_cm': comprimentos_fisicos_cm,
             'total_palitos': total_palitos,
             'esforcos_n': esforcos_n,
@@ -153,7 +177,9 @@ class TrussAG:
                 piores_tensoes.append(tensao_pa)
                 fs = self.calcular_fator_seguranca(tensao_pa, True)
             elif forca < -1e-9:
-                limite_comp_pa = self.calcular_capacidade_compressao(ind.n[i], comprimento_m)
+                # Banzos superiores (índices 4-7): verifica flambagem lateral com L_eff = w
+                w_m = ind.w / 100.0 if i in range(4, 8) else None
+                limite_comp_pa = self.calcular_capacidade_compressao(ind.n[i], comprimento_m, w_m)
                 tensao_efetiva_pa = tensao_pa * (self.SIGMA_C_YIELD / limite_comp_pa) if limite_comp_pa > 0 else tensao_pa * 1e3
                 piores_tensoes.append(tensao_efetiva_pa)
                 fs = limite_comp_pa / tensao_pa if tensao_pa > 0 else float('inf')
@@ -172,23 +198,21 @@ class TrussAG:
         ind.fator_seguranca = fs_minimo
 
         v = 0.0
-        if massa_g > 100.0:
-            v += (massa_g - 100.0) * 100.0
+        if massa_g > 600.0:
+            v += (massa_g - 600.0) * 100.0
             
         p_total = np.sum(ind.p)
+        # comprimento da treliça = sum(p), alvo 43–51 cm
         if p_total < 43.0:
-            v += (43.0 - p_total) * 50.0
+            v += (43.0 - p_total) * 500.0
         if p_total > 51.0:
-            v += (p_total - 51.0) * 50.0
+            v += (p_total - 51.0) * 500.0
             
         if any(ind.n[i] == 1 for i in range(4)):
             v += 200.0
             
         if fs_minimo < 1.0:
             v += (1.0 - fs_minimo) * 1000.0
-            
-        if fs_minimo > 1.5 and massa_g > 100.0:
-            v += (fs_minimo - 1.0) * 100.0
             
         if total_palitos > 150:
             v += (total_palitos - 150) * 10.0
@@ -291,7 +315,10 @@ class TrussAG:
                 if random.random() < 0.1:
                     f.n[j] = random.choice([1, 2, 3])
                     
-            f.p = np.clip(f.p, self.P_MIN, self.P_MAX)
+            f.p[0] = np.clip(f.p[0], self.P0_MIN, self.P0_MAX)
+            f.p[1] = np.clip(f.p[1], self.P1_MIN, self.P1_MAX)
+            f.p[2] = np.clip(f.p[2], self.P1_MIN, self.P1_MAX)
+            f.p[3] = np.clip(f.p[3], self.P0_MIN, self.P0_MAX)
             f.h = np.clip(f.h, self.H_MIN, self.H_MAX)
             f.w = np.clip(f.w, self.W_MIN, self.W_MAX)
             f.p, f.h, f.n = self.impor_simetria(f.p, f.h, f.n)

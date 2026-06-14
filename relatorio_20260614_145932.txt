@@ -1,0 +1,35 @@
+============================================================
+RELATORIO DA MELHOR TRELICA 3D (HOWE)
+============================================================
+Massa Calculada        : 89.76 g
+Fator de Seguranca     : 6.286
+Peso Maximo Suportado  : 94.29 kg  (925.0 N)
+Eficiencia (Fit Real)  : 1.0504 kg/g
+Tensao Max. Atuante    : 5.57 MPa
+Deslocamento (PTV)     : 0.28 mm
+Palitos Utilizados     : 76 unidades
+Largura 3D (w)         : 7.31 cm
+Paineis (p1..p4) cm    : [10.75 10.78 10.78 10.75] (Total: 43.06 cm)
+Alturas (h1..h5) cm    : [ 4.29  9.82 11.78  9.82  4.29]
+Camadas p/ Barra (n)   : [2 2 2 2 3 3 3 3 2 2 1 2 2 1 1 1 1]
+
+Detalhamento das Barras:
+A-B: 11.25 cm (2 palitos)
+B-C: 10.78 cm (2 palitos)
+C-D: 10.78 cm (2 palitos)
+D-E: 11.25 cm (2 palitos)
+F-G: 12.09 cm (3 palitos)
+G-H: 10.95 cm (3 palitos)
+H-I: 10.95 cm (3 palitos)
+I-J: 12.09 cm (3 palitos)
+A-F: 4.29 cm (2 palitos)
+G-B: 9.82 cm (2 palitos)
+H-C: 11.78 cm (1 palito)
+I-D: 9.82 cm (2 palitos)
+E-J: 4.29 cm (2 palitos)
+F-B: 11.57 cm (1 palito)
+G-C: 14.58 cm (1 palito)
+I-C: 14.58 cm (1 palito)
+J-D: 11.57 cm (1 palito)
+
+Relatorio salvo em: /home/leandramts/Área de trabalho/ag_trelica/relatorio_20260614_145932.txt
