@@ -98,28 +98,23 @@ class Visualizer:
         if pop_pts:
             pp = np.asarray(pop_pts, dtype=float)
             if len(pp) > 0:
-                # Plota a nuvem cinza completa
                 ax.scatter(pp[:, 0], pp[:, 1], s=10, color=self.CINZA, alpha=0.3, label="Nuvem Historica", zorder=3)
                 
-                # Extrai a Fronteira de Pareto real e completa matematicamente DA NUVEM
                 # Ignorando pontos inválidos com tensão 0
                 valid_pp = pp[pp[:, 1] > 0]
                 if len(valid_pp) > 0:
-                    # Ordena primeiro pela Massa (X) crescente e depois pela 1/Tensao (Y) decrescente
                     idx = np.lexsort((-valid_pp[:, 1], valid_pp[:, 0]))
                     pp_sorted = valid_pp[idx]
                     
                     pareto_front = []
                     max_y = -np.inf
                     for pt in pp_sorted:
-                        # Se o Y (1/Tensão) for maior que o máximo já visto, ele domina o topo
                         if pt[1] > max_y:
                             pareto_front.append(pt)
                             max_y = pt[1]
                             
                     pareto_front = np.array(pareto_front)
                     
-                    # Desenha a linha de Pareto que abraça perfeitamente a curva
                     ax.plot(pareto_front[:, 0], pareto_front[:, 1], color=self.ROXO, lw=2.0, zorder=4)
                     ax.scatter(pareto_front[:, 0], pareto_front[:, 1], s=35, color=self.ROXO, edgecolors="white", linewidths=0.5, label="Pareto Global", zorder=5)
                 
@@ -138,7 +133,6 @@ class Visualizer:
             todas_pops.extend(historico_pop[frame_idx])
             self._desenhar_trelica(ax_t, historico_melhor[frame_idx], frame_idx + 1, total_gens)
             best_obj = [historico_melhor[frame_idx].massa_g, historico_melhor[frame_idx].inv_tensao]
-            # A variável historico_fronteira[frame_idx] é ignorada e a fronteira é gerada baseada em 'todas_pops'
             self._desenhar_scatter(ax_s, None, todas_pops, best_obj, frame_idx + 1, total_gens)
             return []
         ani = animation.FuncAnimation(fig, update, frames=total_gens, interval=140, repeat=False, blit=False)

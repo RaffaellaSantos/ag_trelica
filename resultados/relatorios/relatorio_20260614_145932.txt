@@ -32,4 +32,3 @@ G-C: 14.58 cm (1 palito)
 I-C: 14.58 cm (1 palito)
 J-D: 11.57 cm (1 palito)
 
-Relatorio salvo em: /home/leandramts/Área de trabalho/ag_trelica/relatorio_20260614_145932.txt

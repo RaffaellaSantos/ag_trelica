@@ -33,4 +33,3 @@ Detalhamento das Barras:
   I-C        11.96 cm   15.46 cm         1              2 *** EMENDA ***
   J-D        10.28 cm   13.78 cm         1              1
 
-Relatorio salvo em: /home/leandramts/Área de trabalho/ag_trelica/relatorio_20260614_172747.txt
