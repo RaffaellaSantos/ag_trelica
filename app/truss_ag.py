@@ -33,9 +33,9 @@ class TrussAG:
         self.T_SECTION_M = 0.0017
         self.SOBREPOSICAO_CM = 4.0
         self.RHO = 510.0
-        self.E_PA = 3.5e9
-        self.SIGMA_T_YIELD = 55e6
-        self.SIGMA_C_YIELD = 35e6
+        self.E_PA = 3.73e9
+        self.SIGMA_T_YIELD = 65.5e6
+        self.SIGMA_C_YIELD = 39e6
         self.P0_MIN, self.P0_MAX = 10.0, 12.0  # painéis externos AB e DE: corte = p + 2 ≤ 14
         self.P1_MIN, self.P1_MAX = 7.0, 10.0   # painéis internos BC e CD: corte = p + 4 ≤ 14
         self.H_MIN, self.H_MAX = 3.0, 7.8
