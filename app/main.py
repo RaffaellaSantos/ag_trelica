@@ -91,29 +91,41 @@ def main():
 
             with open(nome_arquivo_csv, "w", newline="", encoding="utf-8") as f_csv:
                 writer = csv.writer(f_csv)
+                # Adicionamos as colunas das coordenadas X e Y dos dois nós da barra
                 writer.writerow([
                     "geração", 
                     "Id_Barra", 
                     "Nome_Barra", 
                     "Tamanho Geometrico (cm)", 
                     "Tamanho de Corte (cm)", 
-                    "Fitness"
+                    "Fitness",
+                    "No1_X", "No1_Y", "No2_X", "No2_Y" 
                 ])
 
-                for gen_idx, ind, in enumerate(historico_melhor):
+                for gen_idx, ind in enumerate(historico_melhor):
                     geracao = gen_idx + 1
                     fitness = ind.eficiencia
                     comp_geometricos = ind.dados_extras.get('comprimentos_geometricos_cm', [])
                     comp_corte = ind.dados_extras.get('comprimentos_cm', [])
+                    nos_trelica = ind.dados_extras.get('nos', []) # Puxa as coordenadas!
 
                     for id_idx in range(17):
-                        id_barra = id_idx + 1 # Barra 1, Barra 2...
-                        nome_barra = nomes_das_barras[id_idx] # AB, BC...
+                        id_barra = id_idx + 1 
+                        nome_barra = nomes_das_barras[id_idx] 
                         tam_geom = round(comp_geometricos[id_idx], 4)
                         tam_corte = round(comp_corte[id_idx], 4)
                         fit_arredondado = round(fitness, 4)
                         
-                        writer.writerow([geracao, id_barra, nome_barra, tam_geom, tam_corte, fit_arredondado])
+                        # Pega os índices dos nós que formam esta barra específica
+                        i, j = bar_conns[id_idx]
+                        
+                        # Pega as coordenadas X e Y de cada nó
+                        no1_x = round(nos_trelica[i][0], 4)
+                        no1_y = round(nos_trelica[i][1], 4)
+                        no2_x = round(nos_trelica[j][0], 4)
+                        no2_y = round(nos_trelica[j][1], 4)
+                        
+                        writer.writerow([geracao, id_barra, nome_barra, tam_geom, tam_corte, fit_arredondado, no1_x, no1_y, no2_x, no2_y])
 
             vis = Visualizer()
             vis.gerar_animacao(historico_melhor, historico_fronteira, historico_pop, geracoes, caminho_gif)

@@ -185,6 +185,7 @@ class TrussAG:
             "total_palitos": total_palitos,
             "esforcos_n": esforcos_n,
             "deslocamento_mm": deslocamento_m * 1000.0,
+            "nos": nos,  # <--- SÓ ADICIONAR ESTA LINHA!
         }
 
         piores_tensoes = []
