@@ -99,7 +99,8 @@ def main():
                     "Tamanho Geometrico (cm)", 
                     "Tamanho de Corte (cm)", 
                     "Fitness",
-                    "No1_X", "No1_Y", "No2_X", "No2_Y" 
+                    "No1_X", "No1_Y", "No2_X", "No2_Y" ,
+                    "Estado"
                 ])
 
                 for gen_idx, ind in enumerate(historico_melhor):
@@ -116,16 +117,21 @@ def main():
                         tam_corte = round(comp_corte[id_idx], 4)
                         fit_arredondado = round(fitness, 4)
                         
-                        # Pega os índices dos nós que formam esta barra específica
                         i, j = bar_conns[id_idx]
                         
-                        # Pega as coordenadas X e Y de cada nó
                         no1_x = round(nos_trelica[i][0], 4)
                         no1_y = round(nos_trelica[i][1], 4)
                         no2_x = round(nos_trelica[j][0], 4)
                         no2_y = round(nos_trelica[j][1], 4)
                         
-                        writer.writerow([geracao, id_barra, nome_barra, tam_geom, tam_corte, fit_arredondado, no1_x, no1_y, no2_x, no2_y])
+                        # --- CÓDIGO NOVO AQUI ---
+                        esforcos = ind.dados_extras.get('esforcos_n', [])
+                        forca = esforcos[id_idx] if len(esforcos) > 0 else 0
+                        estado = "Tensionada" if forca > 1e-9 else "Comprimida" if forca < -1e-9 else "Neutra"
+                        # ------------------------
+                        
+                        # Adicione a variável 'estado' no final da lista abaixo!
+                        writer.writerow([geracao, id_barra, nome_barra, tam_geom, tam_corte, fit_arredondado, no1_x, no1_y, no2_x, no2_y, estado])
 
             vis = Visualizer()
             vis.gerar_animacao(historico_melhor, historico_fronteira, historico_pop, geracoes, caminho_gif)
